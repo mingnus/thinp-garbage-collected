@@ -40,7 +40,7 @@ struct GCState {
 }
 
 // FIXME: Instead of RoaringBitmap we should use an on disk bitmap
-struct BlockAllocator {
+pub struct BlockAllocator {
     nr_data_blocks: u64,
 
     metadata_cache: Arc<MetadataCache>,
@@ -83,6 +83,14 @@ impl BlockAllocator {
         let mut data = self.metadata_cache.read_lock(block).unwrap();
         let kind = self.block_register.kinds.get(&block).unwrap();
         kind.refs(&data)
+    }
+
+    pub fn gc_quiesce(&mut self) {
+        todo!();
+    }
+
+    pub fn gc_resume(&mut self) {
+        todo!();
     }
 
     fn gc_begin<I>(&mut self, roots: I)
