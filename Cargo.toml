@@ -1,0 +1,13 @@
+[package]
+name = "thinp-no-space-maps"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0"
+byteorder = "1.3"  
+bitset-fixed = "0.1"
+roaring = "0.10"
+thinp = { git = "https://github.com/jthornber/thin-provisioning-tools.git", branch = "main" }
