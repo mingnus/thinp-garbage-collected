@@ -5,6 +5,7 @@ use std::io::Result;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use thinp::io_engine::*;
+use std::io::{Read, Write};
 
 use crate::lru::*;
 
@@ -14,25 +15,28 @@ use crate::lru::*;
 // the cache just before it writes the block to disk.  Similarly the checksum
 // will be verified by the cache when it reads the block from disk.
 pub struct BlockHeader {
-    loc: u64,
-    kind: u32,
-    sum: u32,
+    pub loc: u32,
+    pub kind: u32,
+    pub sum: u32,
 }
 
-pub fn read_header(data: &[u8]) -> Result<BlockHeader> {
-    let mut data = std::io::Cursor::new(data);
-    let loc = data.read_u64::<LittleEndian>()?;
-    let kind = data.read_u32::<LittleEndian>()?;
-    let sum = data.read_u32::<LittleEndian>()?;
+pub const BLOCK_HEADER_SIZE: usize = 16;
+pub const BLOCK_PAYLOAD_SIZE: usize = 4096 - BLOCK_HEADER_SIZE;
+
+pub fn read_block_header<R: Read>(r: &mut R) -> Result<BlockHeader> {
+    let loc = r.read_u32::<LittleEndian>()?;
+    let kind = r.read_u32::<LittleEndian>()?;
+    let _padding = r.read_u32::<LittleEndian>()?;
+    let sum = r.read_u32::<LittleEndian>()?;
 
     Ok(BlockHeader { loc, kind, sum })
 }
 
-pub fn write_header(data: &mut [u8], loc: u64, kind: u32) -> Result<()> {
-    let mut data = std::io::Cursor::new(data);
-    data.write_u64::<LittleEndian>(loc)?;
-    data.write_u32::<LittleEndian>(kind)?;
-    data.write_u32::<LittleEndian>(0)?;
+pub fn write_block_header<W: Write>(w: &mut W, hdr: BlockHeader) -> Result<()> {
+    w.write_u32::<LittleEndian>(hdr.loc)?;
+    w.write_u32::<LittleEndian>(hdr.kind)?;
+    w.write_u32::<LittleEndian>(0)?;
+    w.write_u32::<LittleEndian>(hdr.sum)?;
 
     Ok(())
 }
@@ -40,7 +44,7 @@ pub fn write_header(data: &mut [u8], loc: u64, kind: u32) -> Result<()> {
 //-------------------------------------------------------------------------
 
 pub struct ReadProxy {
-    loc: u32,
+    pub loc: u32,
     block: Arc<Block>,
 }
 
@@ -59,7 +63,7 @@ impl std::ops::Deref for ReadProxy {
 }
 
 pub struct WriteProxy {
-    loc: u32,
+    pub loc: u32,
     block: Arc<Block>,
 }
 

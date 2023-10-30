@@ -44,6 +44,7 @@ impl TransactionManager {
         cache.flush();
 
         // set new roots ready for next gc
+        todo!();
 
         // get superblock for next transaction
 
@@ -71,6 +72,7 @@ impl TransactionManager {
     pub fn new_block(&mut self) -> Result<WriteProxy> {
         if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
             let b = self.cache.lock().unwrap().zero_lock(loc)?;
+            self.shadows.insert(loc);
             Ok(b)
         } else {
             // FIXME: I think we need our own error type to distinguish
@@ -87,10 +89,7 @@ impl TransactionManager {
             let old = cache.read_lock(loc)?;
             let mut new = cache.zero_lock(loc)?;
             self.shadows.insert(loc);
-
-            // copy old to new
             new.as_mut().copy_from_slice(old.as_ref());
-
             Ok(new)
         } else {
             Err(anyhow::anyhow!("out of metadata blocks"))
