@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::block_cache::*;
 use crate::byte_types::*;
+use crate::spine::*;
 use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
@@ -39,6 +40,7 @@ fn write_node_header<W: Write>(w: &mut W, hdr: NodeHeader) -> Result<()> {
     Ok(())
 }
 
+/*
 fn key_base(data: &mut [u8]) -> &mut [u8] {
     &mut data[KEYS_OFFSET..VALUES_OFFSET]
 }
@@ -46,6 +48,7 @@ fn key_base(data: &mut [u8]) -> &mut [u8] {
 fn value_base(data: &mut [u8]) -> &mut [u8] {
     &mut data[VALUES_OFFSET..]
 }
+*/
 
 //-------------------------------------------------------------------------
 
@@ -78,12 +81,6 @@ impl<Data: Readable> Node<Data> {
             values,
         }
     }
-
-    /*
-    fn from_block(block: &'a mut WriteProxy) -> Self {
-        Self::new(block.loc, block.as_mut())
-    }
-    */
 
     fn is_leaf(&self) -> bool {
         self.flags.get() == BTreeFlags::Leaf as u32
@@ -136,76 +133,6 @@ type WNode = Node<WriteProxy>;
 
 //-------------------------------------------------------------------------
 
-struct Spine<'a> {
-    tm: &'a mut TransactionManager,
-    new_root: u32,
-    parent: Option<WriteProxy>,
-    child: WriteProxy,
-}
-
-impl<'a> Spine<'a> {
-    fn new(tm: &'a mut TransactionManager, root: u32) -> Result<Self> {
-        let mut child = tm.shadow(root)?;
-        let new_root = child.loc;
-        Ok(Self {
-            tm,
-            new_root,
-            parent: None,
-            child: child,
-        })
-    }
-
-    fn top(&self) -> bool {
-        self.parent.is_none()
-    }
-
-    fn push(&mut self, loc: u32) -> Result<()> {
-        let mut block = self.tm.shadow(loc)?;
-        std::mem::swap(&mut block, &mut self.child);
-        self.parent = Some(block);
-        Ok(())
-    }
-
-    fn replace_child(&mut self, block: WriteProxy) {
-        self.child = block;
-    }
-
-    fn replace_child_loc(&mut self, loc: u32) -> Result<()> {
-        let block = self.tm.shadow(loc)?;
-        self.child = block;
-        Ok(())
-    }
-
-    fn peek(&self, loc: u32) -> Result<ReadProxy> {
-        let block = self.tm.read(loc)?;
-        Ok(block)
-    }
-
-    // Used for temporary writes, such as siblings for rebalancing.
-    // We can always use replace_child() to put them on the spine.
-    fn shadow(&mut self, loc: u32) -> Result<WriteProxy> {
-        let block = self.tm.shadow(loc)?;
-        Ok(block)
-    }
-
-    fn child(&mut self) -> WriteProxy {
-        self.child.clone()
-    }
-
-    fn parent(&self) -> WriteProxy {
-        match self.parent {
-            None => panic!("No parent"),
-            Some(ref p) => p.clone(),
-        }
-    }
-
-    fn new_block(&mut self) -> Result<WriteProxy> {
-        self.tm.new_block()
-    }
-}
-
-//-------------------------------------------------------------------------
-
 fn w_node(block: WriteProxy) -> WNode {
     Node::new(block.loc, block)
 }
@@ -251,11 +178,11 @@ pub struct BTree {
 
 impl BTree {
     pub fn new(tm: Arc<Mutex<TransactionManager>>, root: u32) -> Self {
-        Self { tm, root: 0 }
+        Self { tm, root }
     }
 
     pub fn lookup(&self, key: u32) -> Option<u32> {
-        let mut tm = self.tm.lock().unwrap();
+        let tm = self.tm.lock().unwrap();
         let mut block = tm.read(self.root).unwrap();
 
         loop {
@@ -282,7 +209,6 @@ impl BTree {
         let nr_right = right.nr_entries.get() as usize;
         let total = nr_left + nr_right;
         let target_left = total / 2;
-        let target_right = total - target_left;
 
         if nr_left < target_left {
             // Move entries from right to left
@@ -308,7 +234,6 @@ impl BTree {
         let total = nr_left + nr_middle + nr_right;
         let target_left = total / 3;
         let target_middle = (total - target_left) / 2;
-        let target_right = total - target_left - target_middle;
 
         if nr_left < target_left {
             // Move entries from right to left
@@ -376,9 +301,9 @@ impl BTree {
         drop(right);
 
         if key < rkeys[0] {
-            spine.push(left_loc);
+            spine.push(left_loc)?;
         } else {
-            spine.push(right_loc);
+            spine.push(right_loc)?;
         }
 
         Ok(())
@@ -446,7 +371,7 @@ impl BTree {
 
         // Choose the correct child in the spine
         if key >= right.keys.get(0) {
-            spine.replace_child_loc(right_loc);
+            spine.replace_child_loc(right_loc)?;
         }
 
         Ok(())
@@ -571,7 +496,7 @@ impl BTree {
             child.values.set(idx as usize, loc);
         }
 
-        self.root = spine.new_root;
+        self.root = spine.get_root();
         Ok(())
     }
 }
