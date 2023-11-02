@@ -1,9 +1,10 @@
 use anyhow::Result;
 use std::ops::Range;
+use std::path::Path;
 
-use crate::extent_allocator::ExtentAllocator;
 use crate::block_allocator::BlockAllocator;
-use crate::block_cache::BlockCache;
+use crate::block_cache::*;
+// use crate::extent_allocator::ExtentAllocator;
 use crate::transaction_manager::TransactionManager;
 
 //-------------------------------------------------------------------------
@@ -11,10 +12,9 @@ use crate::transaction_manager::TransactionManager;
 type ThinID = u64;
 
 struct Pool {
-    data_extent_allocator: ExtentAllocator,
-    
+    // data_extent_allocator: ExtentAllocator,
     allocator: BlockAllocator, // This manages both metadata and data blocks.
-    cache: BlockCache,
+    cache: MetadataCache,
     tm: TransactionManager,
 }
 
@@ -123,7 +123,7 @@ struct RangeResult {
     maybe_shared: bool,
 }
 
-impl ThinDevice {
+impl<'a> ThinDevice<'a> {
     pub fn get_id(&self) -> ThinID {
         todo!();
     }

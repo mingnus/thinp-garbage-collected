@@ -39,6 +39,11 @@ struct GCState {
     queue: VecDeque<BlockRef>,
 }
 
+enum GCProgress {
+    Incomplete,
+    Complete,
+}
+
 // FIXME: Instead of RoaringBitmap we should use an on disk bitmap
 pub struct BlockAllocator {
     nr_data_blocks: u64,
@@ -53,7 +58,6 @@ pub struct BlockAllocator {
     allocated_data: Bitset,
 
     block_register: BlockRegister,
-    gc_state: Option<GCState>,
 }
 
 // Manages both metadata and data blocks.
@@ -93,7 +97,7 @@ impl BlockAllocator {
         todo!();
     }
 
-    fn gc_begin<I>(&mut self, roots: I)
+    fn gc_begin<I>(&mut self, roots: I) -> GCState
     where
         I: IntoIterator<Item = u32>,
     {
@@ -107,29 +111,24 @@ impl BlockAllocator {
             queue.push_back(BlockRef::Metadata(root));
         }
 
-        self.gc_state = Some(GCState {
+        GCState {
             seen_metadata,
             seen_data,
             queue,
-        });
+        }
     }
 
-    fn gc_step(&mut self, nr_nodes: usize) {
-        if self.gc_state.is_none() {
-            let roots = todo!();
-            self.gc_begin(roots.iter());
-        }
-
+    fn gc_step(&mut self, state: &mut GCState, nr_nodes: usize) -> GCProgress {
         // Traverse the graph.
         for _ in 0..nr_nodes {
-            match queue.pop_front() {
+            match state.queue.pop_front() {
                 Some(BlockRef::Metadata(block)) => {
-                    if seen_metadata.test_and_set(block as u64) {
-                        queue.extend(self.refs(block));
+                    if state.seen_metadata.test_and_set(block as u64) {
+                        state.queue.extend(self.refs(block));
                     }
                 }
                 Some(BlockRef::Data(block)) => {
-                    seen_data.set(block);
+                    state.seen_data.set(block);
                 }
                 None => {
                     break;
@@ -137,10 +136,10 @@ impl BlockAllocator {
             }
         }
 
-        if queue.is_empty() {
-            self.gc_state = None;
-            self.allocated_metadata = self.gc_state.seen_metadata;
-            self.allocated_data = self.gc_state.seen_data;
+        if state.queue.is_empty() {
+            GCProgress::Complete
+        } else {
+            GCProgress::Incomplete
         }
     }
 }

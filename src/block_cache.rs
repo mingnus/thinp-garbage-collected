@@ -1,12 +1,13 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use roaring::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Result;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use thinp::io_engine::*;
-use std::io::{Read, Write};
 
+use crate::byte_types::*;
 use crate::lru::*;
 
 //-------------------------------------------------------------------------
@@ -43,6 +44,7 @@ pub fn write_block_header<W: Write>(w: &mut W, hdr: BlockHeader) -> Result<()> {
 
 //-------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct ReadProxy {
     pub loc: u32,
     block: Arc<Block>,
@@ -62,6 +64,19 @@ impl std::ops::Deref for ReadProxy {
     }
 }
 
+impl Readable for ReadProxy {
+    fn r(&self) -> &[u8] {
+        self.block.get_data()
+    }
+
+    fn split_at(&self, loc: usize) -> (ReadProxy, ReadProxy) {
+        todo!();
+    }
+}
+
+//-------------------------------------------------------------------------
+
+#[derive(Clone)]
 pub struct WriteProxy {
     pub loc: u32,
     block: Arc<Block>,
@@ -83,6 +98,22 @@ impl std::ops::Deref for WriteProxy {
 
 impl std::ops::DerefMut for WriteProxy {
     fn deref_mut(&mut self) -> &mut [u8] {
+        self.block.get_data()
+    }
+}
+
+impl Readable for WriteProxy {
+    fn r(&self) -> &[u8] {
+        self.block.get_data()
+    }
+
+    fn split_at(&self, loc: usize) -> (WriteProxy, WriteProxy) {
+        todo!();
+    }
+}
+
+impl Writeable for WriteProxy {
+    fn rw(&mut self) -> &mut [u8] {
         self.block.get_data()
     }
 }
@@ -192,7 +223,7 @@ impl CacheEntry {
 
 //-------------------------------------------------------------------------
 
-pub struct MetadataCache {
+struct MetadataCacheInner {
     nr_blocks: u32,
     free_blocks: RoaringBitmap,
     engine: SyncIoEngine,
@@ -201,14 +232,14 @@ pub struct MetadataCache {
     cache: BTreeMap<u32, CacheEntry>,
 }
 
-impl MetadataCache {
+impl MetadataCacheInner {
     pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> Result<Self> {
         let engine = SyncIoEngine::new(path, true)?;
         let nr_blocks = engine.get_nr_blocks() as u32;
         Ok(Self {
             nr_blocks,
             free_blocks: RoaringBitmap::new(),
-            engine: SyncIoEngine::new(path, true)?,
+            engine,
             lru: LRU::with_capacity(capacity),
             cache: BTreeMap::new(),
         })
@@ -251,11 +282,11 @@ impl MetadataCache {
         }
     }
 
-    fn verify_(&self, block: &Block) -> Result<()> {
+    fn verify_(&self, _block: &Block) -> Result<()> {
         todo!();
     }
 
-    fn prep_(&self, block: &mut [u8]) {
+    fn prep_(&self, _block: &mut [u8]) {
         todo!();
     }
 
@@ -266,8 +297,22 @@ impl MetadataCache {
     }
 
     fn writeback_(&mut self, entry: &mut CacheEntry) -> Result<()> {
-        self.prep_(entry.block.as_mut());
+        // FIXME: verify this entry is not locked.
+        let mut data = entry.block.get_data();
+        self.prep_(&mut data);
         self.engine.write(entry.block.as_ref())?;
+        Ok(())
+    }
+
+    fn writeback_loc_(&mut self, loc: u32) -> Result<()> {
+        let entry = self.cache.get_mut(&loc).unwrap();
+        let block = entry.block.clone();
+        drop(entry); // to lose the mutable borrow
+
+        let mut data = block.get_data();
+        self.prep_(&mut data);
+        self.engine.write(block.as_ref())?;
+
         Ok(())
     }
 
@@ -309,7 +354,10 @@ impl MetadataCache {
     pub fn zero_lock(&mut self, loc: u32) -> Result<WriteProxy> {
         if let Some(entry) = self.lookup_(loc) {
             entry.write_lock();
-            entry.block.zero();
+            let mut data = entry.block.get_data();
+            unsafe {
+                std::ptr::write_bytes(&mut data, 0, BLOCK_SIZE);
+            }
             return Ok(WriteProxy {
                 loc,
                 block: entry.block.clone(),
@@ -324,21 +372,84 @@ impl MetadataCache {
 
     /// Writeback all dirty blocks
     pub fn flush(&mut self) {
-        for entry in &mut self.cache.values_mut() {
+        let mut writebacks = Vec::new();
+        for (loc, entry) in &self.cache {
             if entry.dirty {
-                self.writeback_(entry).unwrap();
+                writebacks.push(*loc);
             }
+        }
+
+        for loc in writebacks {
+            self.writeback_loc_(loc);
         }
     }
 
+    /*
     // For use by the garbage collector only.
     pub fn peek<F, T>(&mut self, loc: u32, op: F)
     with
         F: FnOnce(&mut [u8]) -> Result<T>,
     {
-        todo!();    
+        todo!();
 
     }
+    */
 }
 
 //-------------------------------------------------------------------------
+
+pub struct MetadataCache {
+    inner: Mutex<MetadataCacheInner>,
+}
+
+impl MetadataCache {
+    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> Result<Self> {
+        let inner = MetadataCacheInner::new(path, capacity)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    pub fn nr_blocks(&self) -> u32 {
+        let inner = self.inner.lock().unwrap();
+        inner.nr_blocks()
+    }
+
+    pub fn nr_held(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.nr_held()
+    }
+
+    pub fn read_lock(&self, loc: u32) -> Result<ReadProxy> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.read_lock(loc)
+    }
+
+    pub fn write_lock(&self, loc: u32) -> Result<WriteProxy> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.write_lock(loc)
+    }
+
+    ///! Write lock and zero the data (avoids reading the block)
+    pub fn zero_lock(&self, loc: u32) -> Result<WriteProxy> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.zero_lock(loc)
+    }
+
+    /// Writeback all dirty blocks
+    pub fn flush(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.flush();
+    }
+
+    /*
+    // For use by the garbage collector only.
+    pub fn peek<F, T>(&mut self, loc: u32, op: F)
+    with
+        F: FnOnce(&mut [u8]) -> Result<T>,
+    {
+        todo!();
+
+    }
+    */
+}
