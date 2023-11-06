@@ -1,5 +1,4 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use roaring::*;
 use std::collections::BTreeMap;
 use std::io::Result;
 use std::io::{Read, Write};
@@ -44,177 +43,112 @@ pub fn write_block_header<W: Write>(w: &mut W, hdr: BlockHeader) -> Result<()> {
 
 //-------------------------------------------------------------------------
 
-#[derive(Clone)]
-pub struct ReadProxy {
-    pub loc: u32,
-    block: Arc<Block>,
-}
-
-impl Drop for ReadProxy {
-    fn drop(&mut self) {
-        todo!();
-    }
-}
-
-impl std::ops::Deref for ReadProxy {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        self.block.get_data()
-    }
-}
-
-impl Readable for ReadProxy {
-    fn r(&self) -> &[u8] {
-        self.block.get_data()
-    }
-
-    fn split_at(&self, loc: usize) -> (ReadProxy, ReadProxy) {
-        todo!();
-    }
-}
-
-//-------------------------------------------------------------------------
-
-#[derive(Clone)]
-pub struct WriteProxy {
-    pub loc: u32,
-    block: Arc<Block>,
-}
-
-impl Drop for WriteProxy {
-    fn drop(&mut self) {
-        todo!();
-    }
-}
-
-impl std::ops::Deref for WriteProxy {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        self.block.get_data()
-    }
-}
-
-impl std::ops::DerefMut for WriteProxy {
-    fn deref_mut(&mut self) -> &mut [u8] {
-        self.block.get_data()
-    }
-}
-
-impl Readable for WriteProxy {
-    fn r(&self) -> &[u8] {
-        self.block.get_data()
-    }
-
-    fn split_at(&self, loc: usize) -> (WriteProxy, WriteProxy) {
-        todo!();
-    }
-}
-
-impl Writeable for WriteProxy {
-    fn rw(&mut self) -> &mut [u8] {
-        self.block.get_data()
-    }
-}
-
-//-------------------------------------------------------------------------
-
 enum LockState {
     Unlocked,
     Read(usize),
     Write,
 }
 
-struct CacheEntry {
-    lock: Mutex<LockState>,
-    cond: Condvar,
+struct EntryInner {
+    lock: LockState,
     dirty: bool,
-    block: Arc<Block>,
+    block: Block,
+}
+
+struct CacheEntry {
+    inner: Mutex<EntryInner>,
+    cond: Condvar,
 }
 
 impl CacheEntry {
-    fn new_read(block: Arc<Block>) -> CacheEntry {
+    fn new_read(block: Block) -> CacheEntry {
         CacheEntry {
-            lock: Mutex::new(LockState::Read(1)),
+            inner: Mutex::new(EntryInner {
+                lock: LockState::Read(1),
+                dirty: false,
+                block,
+            }),
             cond: Condvar::new(),
-            dirty: false,
-            block,
         }
     }
 
-    fn new_write(block: Arc<Block>) -> CacheEntry {
+    fn new_write(block: Block) -> CacheEntry {
         CacheEntry {
-            lock: Mutex::new(LockState::Write),
+            inner: Mutex::new(EntryInner {
+                lock: LockState::Write,
+                dirty: true,
+                block,
+            }),
             cond: Condvar::new(),
-            dirty: false,
-            block,
         }
     }
 
-    fn read_lock(&mut self) {
+    fn is_held(&self) -> bool {
         use LockState::*;
 
-        let mut lock = self.lock.lock().unwrap();
-        loop {
-            match *lock {
-                Unlocked => {
-                    *lock = Read(1);
-                    break;
-                }
-                Read(n) => {
-                    *lock = Read(n + 1);
-                    break;
-                }
-                Write => {
-                    lock = self.cond.wait(lock).unwrap();
-                }
-            }
+        let inner = self.inner.lock().unwrap();
+        match inner.lock {
+            Unlocked => false,
+            Read(_) => true,
+            Write => true,
         }
     }
 
-    fn write_lock(&mut self) {
+    fn is_dirty(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.dirty
+    }
+
+    // Returns true on success, if false you will need to wait for the lock
+    fn read_lock(&mut self) -> bool {
         use LockState::*;
 
-        let mut lock = self.lock.lock().unwrap();
-        loop {
-            match *lock {
-                Unlocked => {
-                    *lock = Write;
-                    self.dirty = true;
-                    break;
-                }
-                Read(_) => {
-                    lock = self.cond.wait(lock).unwrap();
-                }
-                Write => {
-                    lock = self.cond.wait(lock).unwrap();
-                }
+        let mut inner = self.inner.lock().unwrap();
+        match inner.lock {
+            Unlocked => {
+                inner.lock = Read(1);
+                true
             }
+            Read(n) => {
+                inner.lock = Read(n + 1);
+                true
+            }
+            Write => false,
+        }
+    }
+
+    // Returns true on success, if false you will need to wait for the lock
+    fn write_lock(&mut self) -> bool {
+        use LockState::*;
+
+        let mut inner = self.inner.lock().unwrap();
+        match inner.lock {
+            Unlocked => {
+                inner.lock = Write;
+                inner.dirty = true;
+                true
+            }
+            Read(_) => false,
+            Write => false,
         }
     }
 
     fn unlock(&mut self) {
         use LockState::*;
 
-        let mut lock = self.lock.lock().unwrap();
-        loop {
-            match *lock {
-                Unlocked => {
-                    panic!("Unlocking an unlocked block");
-                }
-                Read(1) => {
-                    *lock = Unlocked;
-                    break;
-                }
-                Read(n) => {
-                    *lock = Read(n - 1);
-                    break;
-                }
-                Write => {
-                    *lock = Unlocked;
-                    break;
-                }
+        let mut inner = self.inner.lock().unwrap();
+        match inner.lock {
+            Unlocked => {
+                panic!("Unlocking an unlocked block");
+            }
+            Read(1) => {
+                inner.lock = Unlocked;
+            }
+            Read(n) => {
+                inner.lock = Read(n - 1);
+            }
+            Write => {
+                inner.lock = Unlocked;
             }
         }
         self.cond.notify_all();
@@ -223,13 +157,19 @@ impl CacheEntry {
 
 //-------------------------------------------------------------------------
 
+enum LockResult {
+    Locked(Arc<CacheEntry>),
+    Busy(Arc<CacheEntry>),
+}
+
 struct MetadataCacheInner {
     nr_blocks: u32,
-    free_blocks: RoaringBitmap,
+    nr_held: usize,
     engine: SyncIoEngine,
 
+    // The LRU lists only contain blocks that are not currently locked.
     lru: LRU,
-    cache: BTreeMap<u32, CacheEntry>,
+    cache: BTreeMap<u32, Arc<CacheEntry>>,
 }
 
 impl MetadataCacheInner {
@@ -238,7 +178,7 @@ impl MetadataCacheInner {
         let nr_blocks = engine.get_nr_blocks() as u32;
         Ok(Self {
             nr_blocks,
-            free_blocks: RoaringBitmap::new(),
+            nr_held: 0,
             engine,
             lru: LRU::with_capacity(capacity),
             cache: BTreeMap::new(),
@@ -250,36 +190,30 @@ impl MetadataCacheInner {
     }
 
     pub fn nr_held(&self) -> usize {
-        self.cache.len()
+        self.nr_held
     }
 
-    fn lookup_(&mut self, loc: u32) -> Option<&mut CacheEntry> {
-        if let Some(entry) = self.cache.get_mut(&loc) {
-            self.lru.hit(loc);
-            return Some(entry);
-        }
-
-        None
-    }
-
-    fn insert_(&mut self, loc: u32, entry: CacheEntry) {
-        use PushResult::*;
-
+    fn insert_lru_(&mut self, loc: u32, entry: Arc<CacheEntry>) -> Result<()> {
         match self.lru.push(loc) {
-            AlreadyPresent => {
+            PushResult::AlreadyPresent => {
                 panic!("AlreadyPresent")
             }
-            Added => {
-                self.cache.insert(loc, entry);
+            PushResult::Added => {
+                // Nothing
             }
-            AddAndEvict(old) => {
+            PushResult::AddAndEvict(old) => {
                 let mut old_entry = self.cache.remove(&old).unwrap();
-                if old_entry.dirty {
-                    self.writeback_(&mut old_entry);
+                if old_entry.is_dirty() {
+                    self.writeback_(&mut old_entry)?;
                 }
-                self.cache.insert(loc, entry);
             }
         }
+
+        Ok(())
+    }
+
+    fn remove_lru_(&mut self, loc: u32) {
+        self.lru.remove(loc);
     }
 
     fn verify_(&self, _block: &Block) -> Result<()> {
@@ -290,83 +224,83 @@ impl MetadataCacheInner {
         todo!();
     }
 
-    fn read_(&mut self, loc: u32) -> Result<Arc<Block>> {
+    fn read_(&mut self, loc: u32) -> Result<Block> {
         let block = self.engine.read(loc as u64)?;
         self.verify_(&block)?;
-        Ok(Arc::new(block))
+        Ok(block)
     }
 
     fn writeback_(&mut self, entry: &mut CacheEntry) -> Result<()> {
-        // FIXME: verify this entry is not locked.
-        let mut data = entry.block.get_data();
+        let inner = entry.inner.lock().unwrap();
+        let mut data = inner.block.get_data();
         self.prep_(&mut data);
-        self.engine.write(entry.block.as_ref())?;
+        self.engine.write(&inner.block)?;
         Ok(())
     }
 
-    fn writeback_loc_(&mut self, loc: u32) -> Result<()> {
+    fn unlock(&mut self, loc: u32) -> Result<()> {
         let entry = self.cache.get_mut(&loc).unwrap();
-        let block = entry.block.clone();
-        drop(entry); // to lose the mutable borrow
-
-        let mut data = block.get_data();
-        self.prep_(&mut data);
-        self.engine.write(block.as_ref())?;
-
+        entry.unlock();
+        self.insert_lru_(loc, entry.clone())?;
         Ok(())
     }
 
-    fn unlock_(&mut self, loc: u32) {
-        self.cache.get_mut(&loc).unwrap().unlock();
-    }
+    // Returns true on success
+    pub fn read_lock(&mut self, loc: u32) -> Result<LockResult> {
+        use LockResult::*;
 
-    pub fn read_lock(&mut self, loc: u32) -> Result<ReadProxy> {
-        if let Some(entry) = self.lookup_(loc) {
-            entry.read_lock();
-            return Ok(ReadProxy {
-                loc,
-                block: entry.block.clone(),
-            });
+        if let Some(entry) = self.cache.get_mut(&loc) {
+            if entry.read_lock() {
+                self.remove_lru_(loc);
+                Ok(Locked(entry.clone()))
+            } else {
+                Ok(Busy(entry.clone()))
+            }
         } else {
-            let entry = CacheEntry::new_read(self.read_(loc)?);
-            let block = entry.block.clone();
-            self.insert_(loc, entry);
-            return Ok(ReadProxy { loc, block });
+            let entry = Arc::new(CacheEntry::new_read(self.read_(loc)?));
+            self.cache.insert(loc, entry.clone());
+            Ok(Locked(entry.clone()))
         }
     }
 
-    pub fn write_lock(&mut self, loc: u32) -> Result<WriteProxy> {
-        if let Some(entry) = self.lookup_(loc) {
-            entry.write_lock();
-            return Ok(WriteProxy {
-                loc,
-                block: entry.block.clone(),
-            });
+    pub fn write_lock(&mut self, loc: u32) -> Result<LockResult> {
+        use LockResult::*;
+
+        if let Some(entry) = self.cache.get_mut(&loc) {
+            if entry.write_lock() {
+                self.remove_lru_(loc);
+                Ok(Locked(entry.clone()))
+            } else {
+                Ok(Busy(entry.clone()))
+            }
         } else {
-            let entry = CacheEntry::new_write(self.read_(loc)?);
-            let block = entry.block.clone();
-            self.insert_(loc, entry);
-            return Ok(WriteProxy { loc, block });
+            let entry = Arc::new(CacheEntry::new_write(self.read_(loc)?));
+            self.cache.insert(loc, entry.clone());
+            Ok(Locked(entry.clone()))
         }
     }
 
     ///! Write lock and zero the data (avoids reading the block)
-    pub fn zero_lock(&mut self, loc: u32) -> Result<WriteProxy> {
-        if let Some(entry) = self.lookup_(loc) {
-            entry.write_lock();
-            let mut data = entry.block.get_data();
-            unsafe {
-                std::ptr::write_bytes(&mut data, 0, BLOCK_SIZE);
+    pub fn zero_lock(&mut self, loc: u32) -> Result<LockResult> {
+        use LockResult::*;
+
+        if let Some(entry) = self.cache.get_mut(&loc) {
+            if entry.write_lock() {
+                let inner = entry.inner.lock().unwrap();
+                let mut data = inner.block.get_data();
+                unsafe {
+                    std::ptr::write_bytes(&mut data, 0, BLOCK_SIZE);
+                }
+                self.remove_lru_(loc);
+                Ok(Locked(entry.clone()))
+            } else {
+                Ok(Busy(entry.clone()))
             }
-            return Ok(WriteProxy {
-                loc,
-                block: entry.block.clone(),
-            });
         } else {
-            let block = Arc::new(Block::zeroed(loc as u64));
-            let entry = CacheEntry::new_write(block.clone());
-            self.insert_(loc, entry);
-            return Ok(WriteProxy { loc, block });
+            let block = Block::zeroed(loc as u64);
+            let entry = Arc::new(CacheEntry::new_write(block));
+            self.cache.insert(loc, entry.clone());
+            Ok(Locked(entry.clone()))
         }
     }
 
@@ -374,26 +308,89 @@ impl MetadataCacheInner {
     pub fn flush(&mut self) {
         let mut writebacks = Vec::new();
         for (loc, entry) in &self.cache {
-            if entry.dirty {
+            if entry.is_dirty() {
                 writebacks.push(*loc);
             }
         }
 
         for loc in writebacks {
-            self.writeback_loc_(loc);
+            if let Some(entry) = self.cache.get_mut(&loc) {
+                self.writeback_(entry).expect("flush: writeback failed");
+            } else {
+                panic!("flush: block disappeared");
+            }
         }
     }
+}
 
-    /*
-    // For use by the garbage collector only.
-    pub fn peek<F, T>(&mut self, loc: u32, op: F)
-    with
-        F: FnOnce(&mut [u8]) -> Result<T>,
-    {
-        todo!();
+//-------------------------------------------------------------------------
 
+#[derive(Clone)]
+pub struct ReadProxy<'a> {
+    pub loc: u32,
+
+    cache: &'a MetadataCache,
+    begin: usize,
+    end: usize,
+    entry: Arc<CacheEntry>,
+}
+
+impl<'a> Drop for ReadProxy<'a> {
+    fn drop(&mut self) {
+        self.cache.unlock_(self.loc);
     }
-    */
+}
+
+impl<'a> Readable for ReadProxy<'a> {
+    fn r(&self) -> &[u8] {
+        let inner = self.entry.inner.lock().unwrap();
+        &inner.block.get_data()[self.begin..self.end]
+    }
+
+    fn split_at(&self, offset: usize) -> (Self, Self) {
+        assert!(offset < (self.begin - self.end));
+        (
+            Self {
+                loc: self.loc,
+                cache: self.cache,
+                begin: self.begin,
+                end: offset,
+                entry: self.entry.clone(),
+            },
+            Self {
+                loc: self.loc,
+                cache: self.cache,
+                begin: offset,
+                end: self.end,
+                entry: self.entry.clone(),
+            },
+        )
+    }
+}
+
+//-------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct WriteProxy<'a> {
+    inner: ReadProxy<'a>,
+}
+
+impl<'a> Readable for WriteProxy<'a> {
+    fn r(&self) -> &[u8] {
+        self.inner.r()
+    }
+
+    fn split_at(&self, loc: usize) -> (Self, Self) {
+        let (a, b) = self.inner.split_at(loc);
+        (Self { inner: a }, Self { inner: b })
+    }
+}
+
+impl<'a> Writeable for WriteProxy<'a> {
+    fn rw(&mut self) -> &mut [u8] {
+        let inner = self.inner.entry.inner.lock().unwrap();
+        &mut inner.block.get_data()[self.inner.begin..self.inner.end]
+    }
 }
 
 //-------------------------------------------------------------------------
@@ -421,19 +418,71 @@ impl MetadataCache {
     }
 
     pub fn read_lock(&self, loc: u32) -> Result<ReadProxy> {
+        use LockResult::*;
+
         let mut inner = self.inner.lock().unwrap();
-        inner.read_lock(loc)
+
+        loop {
+            match inner.read_lock(loc)? {
+                Locked(entry) => {
+                    return Ok(ReadProxy {
+                        loc,
+                        cache: self,
+                        begin: 0,
+                        end: BLOCK_SIZE,
+                        entry,
+                    })
+                }
+                Busy(entry) => self.wait_on_entry_(&*entry),
+            }
+        }
     }
 
     pub fn write_lock(&self, loc: u32) -> Result<WriteProxy> {
+        use LockResult::*;
+
         let mut inner = self.inner.lock().unwrap();
-        inner.write_lock(loc)
+
+        loop {
+            match inner.write_lock(loc)? {
+                Locked(entry) => {
+                    return Ok(WriteProxy {
+                        inner: ReadProxy {
+                            loc,
+                            cache: self,
+                            begin: 0,
+                            end: BLOCK_SIZE,
+                            entry,
+                        },
+                    })
+                }
+                Busy(entry) => self.wait_on_entry_(&*entry),
+            }
+        }
     }
 
     ///! Write lock and zero the data (avoids reading the block)
     pub fn zero_lock(&self, loc: u32) -> Result<WriteProxy> {
+        use LockResult::*;
+
         let mut inner = self.inner.lock().unwrap();
-        inner.zero_lock(loc)
+
+        loop {
+            match inner.zero_lock(loc)? {
+                Locked(entry) => {
+                    return Ok(WriteProxy {
+                        inner: ReadProxy {
+                            loc,
+                            cache: self,
+                            begin: 0,
+                            end: BLOCK_SIZE,
+                            entry,
+                        },
+                    })
+                }
+                Busy(entry) => self.wait_on_entry_(&*entry),
+            }
+        }
     }
 
     /// Writeback all dirty blocks
@@ -442,14 +491,15 @@ impl MetadataCache {
         inner.flush();
     }
 
-    /*
-    // For use by the garbage collector only.
-    pub fn peek<F, T>(&mut self, loc: u32, op: F)
-    with
-        F: FnOnce(&mut [u8]) -> Result<T>,
-    {
-        todo!();
-
+    // for use by the proxies only
+    fn unlock_(&mut self, loc: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.unlock(loc).expect("unlock failed");
     }
-    */
+
+    // Do not call this with the top level cache lock held
+    fn wait_on_entry_(&self, entry: &CacheEntry) {
+        let inner = entry.inner.lock().unwrap();
+        entry.cond.wait(inner);
+    }
 }
