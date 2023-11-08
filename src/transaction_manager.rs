@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 //------------------------------------------------------------------------------
 
-pub struct TransactionManager {
+struct TransactionManager_ {
     // FIXME: I think both of these should support concurrent access
     allocator: Arc<Mutex<BlockAllocator>>,
     cache: Arc<MetadataCache>,
@@ -22,8 +22,8 @@ pub struct TransactionManager {
 
 const SUPERBLOCK_LOC: u32 = 0;
 
-impl TransactionManager {
-    pub fn new(allocator: Arc<Mutex<BlockAllocator>>, cache: Arc<MetadataCache>) -> Self {
+impl TransactionManager_ {
+    fn new(allocator: Arc<Mutex<BlockAllocator>>, cache: Arc<MetadataCache>) -> Self {
         let superblock = cache.write_lock(SUPERBLOCK_LOC).unwrap();
         Self {
             allocator,
@@ -33,7 +33,7 @@ impl TransactionManager {
         }
     }
 
-    pub fn commit_transaction(&mut self) -> Result<()> {
+    fn commit_transaction(&mut self) -> Result<()> {
         // quiesce the gc
         self.allocator.lock().unwrap().gc_quiesce();
 
@@ -59,18 +59,18 @@ impl TransactionManager {
         Ok(())
     }
 
-    pub fn abort_transaction(&mut self) {}
+    fn abort_transaction(&mut self) {}
 
-    pub fn superblock(&mut self) -> &WriteProxy {
+    fn superblock(&mut self) -> &WriteProxy {
         self.superblock.as_ref().unwrap()
     }
 
-    pub fn read(&self, loc: u32) -> Result<ReadProxy> {
+    fn read(&self, loc: u32) -> Result<ReadProxy> {
         let b = self.cache.read_lock(loc)?;
         Ok(b)
     }
 
-    pub fn new_block(&mut self) -> Result<WriteProxy> {
+    fn new_block(&mut self) -> Result<WriteProxy> {
         if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
             let b = self.cache.zero_lock(loc)?;
             self.shadows.insert(loc);
@@ -82,7 +82,7 @@ impl TransactionManager {
         }
     }
 
-    pub fn shadow(&mut self, loc: u32) -> Result<WriteProxy> {
+    fn shadow(&mut self, loc: u32) -> Result<WriteProxy> {
         if self.shadows.contains(&loc) {
             Ok(self.cache.write_lock(loc)?)
         } else if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
@@ -96,8 +96,57 @@ impl TransactionManager {
         }
     }
 
-    pub fn inc_ref(&mut self, loc: u32) {
+    fn inc_ref(&mut self, loc: u32) {
         self.shadows.remove(&loc);
+    }
+}
+
+//------------------------------------------------------------------------------
+
+pub struct TransactionManager {
+    inner: Mutex<TransactionManager_>,
+}
+
+impl TransactionManager {
+    pub fn new(allocator: Arc<Mutex<BlockAllocator>>, cache: Arc<MetadataCache>) -> Self {
+        Self {
+            inner: Mutex::new(TransactionManager_::new(allocator, cache)),
+        }
+    }
+
+    pub fn commit_transaction(&self) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.commit_transaction()
+    }
+
+    pub fn abort_transaction(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.abort_transaction()
+    }
+
+    pub fn superblock(&self) -> WriteProxy {
+        let mut inner = self.inner.lock().unwrap();
+        inner.superblock().clone()
+    }
+
+    pub fn read(&self, loc: u32) -> Result<ReadProxy> {
+        let inner = self.inner.lock().unwrap();
+        inner.read(loc)
+    }
+
+    pub fn new_block(&self) -> Result<WriteProxy> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.new_block()
+    }
+
+    pub fn shadow(&self, loc: u32) -> Result<WriteProxy> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.shadow(loc)
+    }
+
+    pub fn inc_ref(&self, loc: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.inc_ref(loc)
     }
 }
 

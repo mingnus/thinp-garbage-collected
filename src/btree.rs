@@ -172,19 +172,18 @@ fn init_node(mut block: WriteProxy, is_leaf: bool) -> Result<WNode> {
 }
 
 pub struct BTree {
-    tm: Arc<Mutex<TransactionManager>>,
+    tm: Arc<TransactionManager>,
     root: u32,
 }
 
 impl BTree {
-    pub fn new(tm: Arc<Mutex<TransactionManager>>, root: u32) -> Self {
+    pub fn new(tm: Arc<TransactionManager>, root: u32) -> Self {
         Self { tm, root }
     }
 
-    pub fn empty_tree(tm: Arc<Mutex<TransactionManager>>) -> Result<Self> {
+    pub fn empty_tree(tm: Arc<TransactionManager>) -> Result<Self> {
         let root = {
-            let mut tm_ = tm.lock().unwrap();
-            let root = tm_.new_block()?;
+            let root = tm.new_block()?;
             let root = init_node(root, true)?;
             root.loc
         };
@@ -197,8 +196,7 @@ impl BTree {
     }
 
     pub fn lookup(&self, key: u32) -> Option<u32> {
-        let tm = self.tm.lock().unwrap();
-        let mut block = tm.read(self.root).unwrap();
+        let mut block = self.tm.read(self.root).unwrap();
 
         loop {
             let node = Node::new(block.loc, block);
@@ -213,7 +211,7 @@ impl BTree {
             }
 
             let child = node.values.get(idx as usize);
-            block = tm.read(child).unwrap();
+            block = self.tm.read(child).unwrap();
         }
     }
 
@@ -367,8 +365,7 @@ impl BTree {
     }
 
     fn get_loc_free_space_(&self, loc: u32) -> usize {
-        let tm = self.tm.lock().unwrap();
-        let block = tm.read(loc).unwrap();
+        let block = self.tm.read(loc).unwrap();
         let node = r_node(block);
         self.get_node_free_space_(&node)
     }

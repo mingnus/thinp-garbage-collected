@@ -16,7 +16,7 @@ struct Pool {
     // data_extent_allocator: ExtentAllocator,
     allocator: BlockAllocator, // This manages both metadata and data blocks.
     cache: Arc<MetadataCache>,
-    tm: TransactionManager,
+    tm: Arc<TransactionManager>,
 }
 
 struct ThinDevice {

@@ -7,18 +7,16 @@ use crate::transaction_manager::*;
 //-------------------------------------------------------------------------
 
 pub struct Spine {
-    tm: Arc<Mutex<TransactionManager>>,
+    tm: Arc<TransactionManager>,
     new_root: u32,
     parent: Option<WriteProxy>,
     child: WriteProxy,
 }
 
 impl Spine {
-    pub fn new(tm: Arc<Mutex<TransactionManager>>, root: u32) -> Result<Self> {
-        let mut tm_ = tm.lock().unwrap();
-        let child = tm_.shadow(root)?;
+    pub fn new(tm: Arc<TransactionManager>, root: u32) -> Result<Self> {
+        let child = tm.shadow(root)?;
         let new_root = child.loc();
-        drop(tm_);
 
         Ok(Self {
             tm,
@@ -37,8 +35,7 @@ impl Spine {
     }
 
     pub fn push(&mut self, loc: u32) -> Result<()> {
-        let mut tm = self.tm.lock().unwrap();
-        let mut block = tm.shadow(loc)?;
+        let mut block = self.tm.shadow(loc)?;
         std::mem::swap(&mut block, &mut self.child);
         self.parent = Some(block);
         Ok(())
@@ -49,23 +46,20 @@ impl Spine {
     }
 
     pub fn replace_child_loc(&mut self, loc: u32) -> Result<()> {
-        let mut tm = self.tm.lock().unwrap();
-        let block = tm.shadow(loc)?;
+        let block = self.tm.shadow(loc)?;
         self.child = block;
         Ok(())
     }
 
     pub fn peek(&self, loc: u32) -> Result<ReadProxy> {
-        let mut tm = self.tm.lock().unwrap();
-        let block = tm.read(loc)?;
+        let block = self.tm.read(loc)?;
         Ok(block)
     }
 
     // Used for temporary writes, such as siblings for rebalancing.
     // We can always use replace_child() to put them on the spine.
     pub fn shadow(&mut self, loc: u32) -> Result<WriteProxy> {
-        let mut tm = self.tm.lock().unwrap();
-        let block = tm.shadow(loc)?;
+        let block = self.tm.shadow(loc)?;
         Ok(block)
     }
 
@@ -81,8 +75,7 @@ impl Spine {
     }
 
     pub fn new_block(&self) -> Result<WriteProxy> {
-        let mut tm = self.tm.lock().unwrap();
-        tm.new_block()
+        self.tm.new_block()
     }
 }
 
