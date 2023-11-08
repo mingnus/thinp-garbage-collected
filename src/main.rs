@@ -10,7 +10,7 @@ fn main() -> Result<()> {
     let metadata = "./metadata.bin";
     let cache = Arc::new(MetadataCache::new(metadata, 16)?);
     let allocator = Arc::new(Mutex::new(BlockAllocator::new(cache.clone(), 100)));
-    let tm = Arc::new(Mutex::new(TransactionManager::new(allocator, &*cache)));
+    let tm = Arc::new(Mutex::new(TransactionManager::new(allocator, cache)));
     let tree = BTree::empty_tree(tm)?;
 
     println!("created empty tree at {}", tree.root());

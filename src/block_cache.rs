@@ -83,6 +83,7 @@ impl CacheEntry {
         }
     }
 
+    /*
     fn is_held(&self) -> bool {
         use LockState::*;
 
@@ -93,6 +94,7 @@ impl CacheEntry {
             Write => true,
         }
     }
+    */
 
     fn is_dirty(&self) -> bool {
         let inner = self.inner.lock().unwrap();
@@ -326,28 +328,28 @@ impl MetadataCacheInner {
 //-------------------------------------------------------------------------
 
 #[derive(Clone)]
-pub struct ReadProxy<'a> {
+pub struct ReadProxy {
     pub loc: u32,
 
-    cache: &'a MetadataCache,
+    cache: Arc<MetadataCache>,
     begin: usize,
     end: usize,
     entry: Arc<CacheEntry>,
 }
 
-impl<'a> ReadProxy<'a> {
+impl ReadProxy {
     pub fn loc(&self) -> u32 {
         self.loc
     }
 }
 
-impl<'a> Drop for ReadProxy<'a> {
+impl Drop for ReadProxy {
     fn drop(&mut self) {
         self.cache.unlock_(self.loc);
     }
 }
 
-impl<'a> Readable for ReadProxy<'a> {
+impl Readable for ReadProxy {
     fn r(&self) -> &[u8] {
         let inner = self.entry.inner.lock().unwrap();
         &inner.block.get_data()[self.begin..self.end]
@@ -358,14 +360,14 @@ impl<'a> Readable for ReadProxy<'a> {
         (
             Self {
                 loc: self.loc,
-                cache: self.cache,
+                cache: self.cache.clone(),
                 begin: self.begin,
                 end: offset,
                 entry: self.entry.clone(),
             },
             Self {
                 loc: self.loc,
-                cache: self.cache,
+                cache: self.cache.clone(),
                 begin: offset,
                 end: self.end,
                 entry: self.entry.clone(),
@@ -377,17 +379,17 @@ impl<'a> Readable for ReadProxy<'a> {
 //-------------------------------------------------------------------------
 
 #[derive(Clone)]
-pub struct WriteProxy<'a> {
-    pub inner: ReadProxy<'a>,
+pub struct WriteProxy {
+    pub inner: ReadProxy,
 }
 
-impl<'a> WriteProxy<'a> {
+impl WriteProxy {
     pub fn loc(&self) -> u32 {
         self.inner.loc
     }
 }
 
-impl<'a> Readable for WriteProxy<'a> {
+impl Readable for WriteProxy {
     fn r(&self) -> &[u8] {
         self.inner.r()
     }
@@ -398,7 +400,7 @@ impl<'a> Readable for WriteProxy<'a> {
     }
 }
 
-impl<'a> Writeable for WriteProxy<'a> {
+impl Writeable for WriteProxy {
     fn rw(&mut self) -> &mut [u8] {
         let inner = self.inner.entry.inner.lock().unwrap();
         &mut inner.block.get_data()[self.inner.begin..self.inner.end]
@@ -429,7 +431,7 @@ impl MetadataCache {
         inner.nr_held()
     }
 
-    pub fn read_lock(&self, loc: u32) -> Result<ReadProxy> {
+    pub fn read_lock(self: &Arc<Self>, loc: u32) -> Result<ReadProxy> {
         use LockResult::*;
 
         let mut inner = self.inner.lock().unwrap();
@@ -439,7 +441,7 @@ impl MetadataCache {
                 Locked(entry) => {
                     return Ok(ReadProxy {
                         loc,
-                        cache: self,
+                        cache: self.clone(),
                         begin: 0,
                         end: BLOCK_SIZE,
                         entry,
@@ -450,7 +452,7 @@ impl MetadataCache {
         }
     }
 
-    pub fn write_lock(&self, loc: u32) -> Result<WriteProxy> {
+    pub fn write_lock(self: &Arc<Self>, loc: u32) -> Result<WriteProxy> {
         use LockResult::*;
 
         let mut inner = self.inner.lock().unwrap();
@@ -461,7 +463,7 @@ impl MetadataCache {
                     return Ok(WriteProxy {
                         inner: ReadProxy {
                             loc,
-                            cache: self,
+                            cache: self.clone(),
                             begin: 0,
                             end: BLOCK_SIZE,
                             entry,
@@ -474,7 +476,7 @@ impl MetadataCache {
     }
 
     ///! Write lock and zero the data (avoids reading the block)
-    pub fn zero_lock(&self, loc: u32) -> Result<WriteProxy> {
+    pub fn zero_lock(self: &Arc<Self>, loc: u32) -> Result<WriteProxy> {
         use LockResult::*;
 
         let mut inner = self.inner.lock().unwrap();
@@ -485,7 +487,7 @@ impl MetadataCache {
                     return Ok(WriteProxy {
                         inner: ReadProxy {
                             loc,
-                            cache: self,
+                            cache: self.clone(),
                             begin: 0,
                             end: BLOCK_SIZE,
                             entry,
@@ -512,6 +514,6 @@ impl MetadataCache {
     // Do not call this with the top level cache lock held
     fn wait_on_entry_(&self, entry: &CacheEntry) {
         let inner = entry.inner.lock().unwrap();
-        entry.cond.wait(inner);
+        let _ = entry.cond.wait(inner);
     }
 }

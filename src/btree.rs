@@ -13,8 +13,8 @@ use crate::transaction_manager::*;
 const NODE_KIND: u32 = 0x424e4f44; // 'B' 'N' 'O' 'D'
 const NODE_HEADER_SIZE: usize = 8;
 const MAX_ENTRIES: usize = (BLOCK_PAYLOAD_SIZE - NODE_HEADER_SIZE) / 8;
-const KEYS_OFFSET: usize = NODE_HEADER_SIZE + BLOCK_HEADER_SIZE;
-const VALUES_OFFSET: usize = KEYS_OFFSET + MAX_ENTRIES * 4;
+// const KEYS_OFFSET: usize = NODE_HEADER_SIZE + BLOCK_HEADER_SIZE;
+// const VALUES_OFFSET: usize = KEYS_OFFSET + MAX_ENTRIES * 4;
 const SPACE_THRESHOLD: usize = 8;
 
 enum BTreeFlags {
@@ -128,12 +128,12 @@ impl<Data: Writeable> Node<Data> {
     }
 }
 
-type RNode<'a> = Node<ReadProxy<'a>>;
-type WNode<'a> = Node<WriteProxy<'a>>;
+type RNode = Node<ReadProxy>;
+type WNode = Node<WriteProxy>;
 
 //-------------------------------------------------------------------------
 
-fn w_node<'a>(block: WriteProxy<'a>) -> WNode {
+fn w_node(block: WriteProxy) -> WNode {
     Node::new(block.inner.loc, block)
 }
 
@@ -171,17 +171,17 @@ fn init_node(mut block: WriteProxy, is_leaf: bool) -> Result<WNode> {
     Ok(w_node(block))
 }
 
-pub struct BTree<'a> {
-    tm: Arc<Mutex<TransactionManager<'a>>>,
+pub struct BTree {
+    tm: Arc<Mutex<TransactionManager>>,
     root: u32,
 }
 
-impl<'a> BTree<'a> {
-    pub fn new(tm: Arc<Mutex<TransactionManager<'a>>>, root: u32) -> Self {
+impl BTree {
+    pub fn new(tm: Arc<Mutex<TransactionManager>>, root: u32) -> Self {
         Self { tm, root }
     }
 
-    pub fn empty_tree(tm: Arc<Mutex<TransactionManager<'a>>>) -> Result<Self> {
+    pub fn empty_tree(tm: Arc<Mutex<TransactionManager>>) -> Result<Self> {
         let root = {
             let mut tm_ = tm.lock().unwrap();
             let root = tm_.new_block()?;

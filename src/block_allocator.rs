@@ -45,6 +45,7 @@ pub enum GCProgress {
 }
 
 // FIXME: Instead of RoaringBitmap we should use an on disk bitmap
+#[allow(dead_code)]
 pub struct BlockAllocator {
     nr_data_blocks: u64,
 

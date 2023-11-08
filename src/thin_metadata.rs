@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crate::block_allocator::BlockAllocator;
 use crate::block_cache::*;
@@ -11,19 +12,19 @@ use crate::transaction_manager::TransactionManager;
 
 type ThinID = u64;
 
-struct Pool<'a> {
+struct Pool {
     // data_extent_allocator: ExtentAllocator,
     allocator: BlockAllocator, // This manages both metadata and data blocks.
-    cache: MetadataCache,
-    tm: TransactionManager<'a>,
+    cache: Arc<MetadataCache>,
+    tm: TransactionManager,
 }
 
-struct ThinDevice<'a> {
-    pool: &'a mut Pool<'a>,
+struct ThinDevice {
+    pool: Arc<Mutex<Pool>>,
     id: ThinID,
 }
 
-impl<'a> Pool<'a> {
+impl Pool {
     pub fn new<P: AsRef<Path>>(_path: P, _data_block_size: u64, _format: bool) -> Self {
         todo!();
     }
@@ -105,7 +106,7 @@ impl<'a> Pool<'a> {
     }
 }
 
-impl<'a> Drop for Pool<'a> {
+impl Drop for Pool {
     fn drop(&mut self) {
         todo!();
     }
@@ -123,7 +124,7 @@ struct RangeResult {
     maybe_shared: bool,
 }
 
-impl<'a> ThinDevice<'a> {
+impl ThinDevice {
     pub fn get_id(&self) -> ThinID {
         todo!();
     }

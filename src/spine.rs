@@ -6,18 +6,20 @@ use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
 
-pub struct Spine<'a> {
-    tm: Arc<Mutex<TransactionManager<'a>>>,
+pub struct Spine {
+    tm: Arc<Mutex<TransactionManager>>,
     new_root: u32,
-    parent: Option<WriteProxy<'a>>,
-    child: WriteProxy<'a>,
+    parent: Option<WriteProxy>,
+    child: WriteProxy,
 }
 
-impl<'a> Spine<'a> {
-    pub fn new(tm: Arc<Mutex<TransactionManager<'a>>>, root: u32) -> Result<Self> {
+impl Spine {
+    pub fn new(tm: Arc<Mutex<TransactionManager>>, root: u32) -> Result<Self> {
         let mut tm_ = tm.lock().unwrap();
         let child = tm_.shadow(root)?;
         let new_root = child.loc();
+        drop(tm_);
+
         Ok(Self {
             tm,
             new_root,

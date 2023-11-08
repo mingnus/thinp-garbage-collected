@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 //------------------------------------------------------------------------------
 
-pub struct TransactionManager<'a> {
+pub struct TransactionManager {
     // FIXME: I think both of these should support concurrent access
     allocator: Arc<Mutex<BlockAllocator>>,
     cache: Arc<MetadataCache>,
@@ -17,12 +17,12 @@ pub struct TransactionManager<'a> {
 
     // While a transaction is in progress we must keep the superblock
     // locked to prevent an accidental commit.
-    superblock: Option<WriteProxy<'a>>,
+    superblock: Option<WriteProxy>,
 }
 
 const SUPERBLOCK_LOC: u32 = 0;
 
-impl<'a> TransactionManager<'a> {
+impl TransactionManager {
     pub fn new(allocator: Arc<Mutex<BlockAllocator>>, cache: Arc<MetadataCache>) -> Self {
         let superblock = cache.write_lock(SUPERBLOCK_LOC).unwrap();
         Self {
