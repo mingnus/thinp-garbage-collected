@@ -7,39 +7,39 @@ use crate::block_cache::*;
 
 //-------------------------------------------------------------------------
 
-enum BlockRef {
+pub enum BlockRef {
     Metadata(u32),
     Data(u64),
 }
 
 // Metadata blocks
-trait MetadataOps {
+pub trait MetadataOps {
     fn refs(&self, data: &[u8]) -> Vec<BlockRef>;
 }
 
-struct BlockRegister {
+pub struct BlockRegister {
     kinds: BTreeMap<u32, Box<dyn MetadataOps>>,
 }
 
 impl BlockRegister {
-    fn new() -> BlockRegister {
+    pub fn new() -> BlockRegister {
         BlockRegister {
             kinds: BTreeMap::new(),
         }
     }
 
-    fn add(&mut self, kind: u32, ops: Box<dyn MetadataOps>) {
+    pub fn add(&mut self, kind: u32, ops: Box<dyn MetadataOps>) {
         self.kinds.insert(kind, ops);
     }
 }
 
-struct GCState {
+pub struct GCState {
     seen_metadata: Bitset,
     seen_data: Bitset,
     queue: VecDeque<BlockRef>,
 }
 
-enum GCProgress {
+pub enum GCProgress {
     Incomplete,
     Complete,
 }
@@ -83,10 +83,14 @@ impl BlockAllocator {
         self.allocated_data.set_first_clear_in_range(region)
     }
 
-    fn refs(&self, block: u32) -> Vec<BlockRef> {
-        let mut data = self.metadata_cache.read_lock(block).unwrap();
+    fn refs(&self, _block: u32) -> Vec<BlockRef> {
+        todo!();
+
+        /*
+        let data = self.metadata_cache.read_lock(block).unwrap();
         let kind = self.block_register.kinds.get(&block).unwrap();
         kind.refs(&data)
+        */
     }
 
     pub fn gc_quiesce(&mut self) {
@@ -97,12 +101,12 @@ impl BlockAllocator {
         todo!();
     }
 
-    fn gc_begin<I>(&mut self, roots: I) -> GCState
+    pub fn gc_begin<I>(&mut self, roots: I) -> GCState
     where
         I: IntoIterator<Item = u32>,
     {
-        let mut seen_metadata = self.reserved_metadata.clone();
-        let mut seen_data = Bitset::new(self.nr_data_blocks);
+        let seen_metadata = self.reserved_metadata.clone();
+        let seen_data = Bitset::new(self.nr_data_blocks);
 
         let mut queue: VecDeque<BlockRef> = VecDeque::new();
 
@@ -118,7 +122,7 @@ impl BlockAllocator {
         }
     }
 
-    fn gc_step(&mut self, state: &mut GCState, nr_nodes: usize) -> GCProgress {
+    pub fn gc_step(&mut self, state: &mut GCState, nr_nodes: usize) -> GCProgress {
         // Traverse the graph.
         for _ in 0..nr_nodes {
             match state.queue.pop_front() {

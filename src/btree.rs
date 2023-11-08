@@ -128,13 +128,13 @@ impl<Data: Writeable> Node<Data> {
     }
 }
 
-type RNode = Node<ReadProxy>;
-type WNode = Node<WriteProxy>;
+type RNode<'a> = Node<ReadProxy<'a>>;
+type WNode<'a> = Node<WriteProxy<'a>>;
 
 //-------------------------------------------------------------------------
 
-fn w_node(block: WriteProxy) -> WNode {
-    Node::new(block.loc, block)
+fn w_node<'a>(block: WriteProxy<'a>) -> WNode {
+    Node::new(block.inner.loc, block)
 }
 
 fn r_node(block: ReadProxy) -> RNode {
@@ -142,7 +142,7 @@ fn r_node(block: ReadProxy) -> RNode {
 }
 
 fn init_node(mut block: WriteProxy, is_leaf: bool) -> Result<WNode> {
-    let loc = block.loc;
+    let loc = block.inner.loc;
 
     // initialise the block
     let mut w = std::io::Cursor::new(block.rw());
@@ -171,14 +171,29 @@ fn init_node(mut block: WriteProxy, is_leaf: bool) -> Result<WNode> {
     Ok(w_node(block))
 }
 
-pub struct BTree {
-    tm: Arc<Mutex<TransactionManager>>,
+pub struct BTree<'a> {
+    tm: Arc<Mutex<TransactionManager<'a>>>,
     root: u32,
 }
 
-impl BTree {
-    pub fn new(tm: Arc<Mutex<TransactionManager>>, root: u32) -> Self {
+impl<'a> BTree<'a> {
+    pub fn new(tm: Arc<Mutex<TransactionManager<'a>>>, root: u32) -> Self {
         Self { tm, root }
+    }
+
+    pub fn empty_tree(tm: Arc<Mutex<TransactionManager<'a>>>) -> Result<Self> {
+        let root = {
+            let mut tm_ = tm.lock().unwrap();
+            let root = tm_.new_block()?;
+            let root = init_node(root, true)?;
+            root.loc
+        };
+
+        Ok(Self { tm, root })
+    }
+
+    pub fn root(&self) -> u32 {
+        self.root
     }
 
     pub fn lookup(&self, key: u32) -> Option<u32> {
@@ -459,9 +474,7 @@ impl BTree {
     }
 
     pub fn insert(&mut self, key: u32, value: u32) -> Result<()> {
-        let tm = self.tm.clone();
-        let mut tm = tm.lock().unwrap();
-        let mut spine = Spine::new(&mut tm, self.root)?;
+        let mut spine = Spine::new(self.tm.clone(), self.root)?;
         let mut idx = 0isize;
 
         loop {

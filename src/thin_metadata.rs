@@ -11,24 +11,24 @@ use crate::transaction_manager::TransactionManager;
 
 type ThinID = u64;
 
-struct Pool {
+struct Pool<'a> {
     // data_extent_allocator: ExtentAllocator,
     allocator: BlockAllocator, // This manages both metadata and data blocks.
     cache: MetadataCache,
-    tm: TransactionManager,
+    tm: TransactionManager<'a>,
 }
 
 struct ThinDevice<'a> {
-    pool: &'a mut Pool,
+    pool: &'a mut Pool<'a>,
     id: ThinID,
 }
 
-impl Pool {
-    pub fn new<P: AsRef<Path>>(_path: P, _data_block_size: u64, _format: bool) -> Pool {
+impl<'a> Pool<'a> {
+    pub fn new<P: AsRef<Path>>(_path: P, _data_block_size: u64, _format: bool) -> Self {
         todo!();
     }
 
-    pub fn open<P: AsRef<Path>>(_path: P, _data_block_size: u64) -> Pool {
+    pub fn open<P: AsRef<Path>>(_path: P, _data_block_size: u64) -> Self {
         todo!();
     }
 
@@ -105,7 +105,7 @@ impl Pool {
     }
 }
 
-impl Drop for Pool {
+impl<'a> Drop for Pool<'a> {
     fn drop(&mut self) {
         todo!();
     }
@@ -132,7 +132,7 @@ impl<'a> ThinDevice<'a> {
         todo!();
     }
 
-    pub fn find_mapped_range(&self, search: Range<u64>) -> Result<Option<RangeResult>> {
+    pub fn find_mapped_range(&self, _search: Range<u64>) -> Result<Option<RangeResult>> {
         todo!();
     }
 

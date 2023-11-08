@@ -100,7 +100,7 @@ impl CacheEntry {
     }
 
     // Returns true on success, if false you will need to wait for the lock
-    fn read_lock(&mut self) -> bool {
+    fn read_lock(&self) -> bool {
         use LockState::*;
 
         let mut inner = self.inner.lock().unwrap();
@@ -118,7 +118,7 @@ impl CacheEntry {
     }
 
     // Returns true on success, if false you will need to wait for the lock
-    fn write_lock(&mut self) -> bool {
+    fn write_lock(&self) -> bool {
         use LockState::*;
 
         let mut inner = self.inner.lock().unwrap();
@@ -133,7 +133,7 @@ impl CacheEntry {
         }
     }
 
-    fn unlock(&mut self) {
+    fn unlock(&self) {
         use LockState::*;
 
         let mut inner = self.inner.lock().unwrap();
@@ -193,7 +193,7 @@ impl MetadataCacheInner {
         self.nr_held
     }
 
-    fn insert_lru_(&mut self, loc: u32, entry: Arc<CacheEntry>) -> Result<()> {
+    fn insert_lru_(&mut self, loc: u32) -> Result<()> {
         match self.lru.push(loc) {
             PushResult::AlreadyPresent => {
                 panic!("AlreadyPresent")
@@ -202,9 +202,9 @@ impl MetadataCacheInner {
                 // Nothing
             }
             PushResult::AddAndEvict(old) => {
-                let mut old_entry = self.cache.remove(&old).unwrap();
+                let old_entry = self.cache.remove(&old).unwrap();
                 if old_entry.is_dirty() {
-                    self.writeback_(&mut old_entry)?;
+                    self.writeback_(&old_entry)?;
                 }
             }
         }
@@ -230,7 +230,7 @@ impl MetadataCacheInner {
         Ok(block)
     }
 
-    fn writeback_(&mut self, entry: &mut CacheEntry) -> Result<()> {
+    fn writeback_(&self, entry: &CacheEntry) -> Result<()> {
         let inner = entry.inner.lock().unwrap();
         let mut data = inner.block.get_data();
         self.prep_(&mut data);
@@ -241,7 +241,7 @@ impl MetadataCacheInner {
     fn unlock(&mut self, loc: u32) -> Result<()> {
         let entry = self.cache.get_mut(&loc).unwrap();
         entry.unlock();
-        self.insert_lru_(loc, entry.clone())?;
+        self.insert_lru_(loc)?;
         Ok(())
     }
 
@@ -249,7 +249,7 @@ impl MetadataCacheInner {
     pub fn read_lock(&mut self, loc: u32) -> Result<LockResult> {
         use LockResult::*;
 
-        if let Some(entry) = self.cache.get_mut(&loc) {
+        if let Some(entry) = self.cache.get_mut(&loc).cloned() {
             if entry.read_lock() {
                 self.remove_lru_(loc);
                 Ok(Locked(entry.clone()))
@@ -266,7 +266,7 @@ impl MetadataCacheInner {
     pub fn write_lock(&mut self, loc: u32) -> Result<LockResult> {
         use LockResult::*;
 
-        if let Some(entry) = self.cache.get_mut(&loc) {
+        if let Some(entry) = self.cache.get_mut(&loc).cloned() {
             if entry.write_lock() {
                 self.remove_lru_(loc);
                 Ok(Locked(entry.clone()))
@@ -284,7 +284,7 @@ impl MetadataCacheInner {
     pub fn zero_lock(&mut self, loc: u32) -> Result<LockResult> {
         use LockResult::*;
 
-        if let Some(entry) = self.cache.get_mut(&loc) {
+        if let Some(entry) = self.cache.get_mut(&loc).cloned() {
             if entry.write_lock() {
                 let inner = entry.inner.lock().unwrap();
                 let mut data = inner.block.get_data();
@@ -314,8 +314,8 @@ impl MetadataCacheInner {
         }
 
         for loc in writebacks {
-            if let Some(entry) = self.cache.get_mut(&loc) {
-                self.writeback_(entry).expect("flush: writeback failed");
+            if let Some(entry) = self.cache.get_mut(&loc).cloned() {
+                self.writeback_(&entry).expect("flush: writeback failed");
             } else {
                 panic!("flush: block disappeared");
             }
@@ -333,6 +333,12 @@ pub struct ReadProxy<'a> {
     begin: usize,
     end: usize,
     entry: Arc<CacheEntry>,
+}
+
+impl<'a> ReadProxy<'a> {
+    pub fn loc(&self) -> u32 {
+        self.loc
+    }
 }
 
 impl<'a> Drop for ReadProxy<'a> {
@@ -372,7 +378,13 @@ impl<'a> Readable for ReadProxy<'a> {
 
 #[derive(Clone)]
 pub struct WriteProxy<'a> {
-    inner: ReadProxy<'a>,
+    pub inner: ReadProxy<'a>,
+}
+
+impl<'a> WriteProxy<'a> {
+    pub fn loc(&self) -> u32 {
+        self.inner.loc
+    }
 }
 
 impl<'a> Readable for WriteProxy<'a> {
@@ -492,7 +504,7 @@ impl MetadataCache {
     }
 
     // for use by the proxies only
-    fn unlock_(&mut self, loc: u32) {
+    fn unlock_(&self, loc: u32) {
         let mut inner = self.inner.lock().unwrap();
         inner.unlock(loc).expect("unlock failed");
     }

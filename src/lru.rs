@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+// FIXME: use linked hash map instead
 #[derive(Debug)]
 struct Entry {
     n: u32,
@@ -113,6 +114,12 @@ impl LRU {
         if let Some(index) = self.tree.get(&n).cloned() {
             self.lru_del_(index);
             self.lru_add_(n, index);
+        }
+    }
+
+    pub fn remove(&mut self, n: u32) {
+        if let Some(index) = self.tree.remove(&n) {
+            self.lru_del_(index);
         }
     }
 }
