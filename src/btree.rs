@@ -1,16 +1,16 @@
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::block_cache::*;
+use crate::block_kinds::*;
 use crate::byte_types::*;
 use crate::spine::*;
 use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
 
-const NODE_KIND: u32 = 0x424e4f44; // 'B' 'N' 'O' 'D'
 const NODE_HEADER_SIZE: usize = 8;
 const MAX_ENTRIES: usize = (BLOCK_PAYLOAD_SIZE - NODE_HEADER_SIZE) / 8;
 // const KEYS_OFFSET: usize = NODE_HEADER_SIZE + BLOCK_HEADER_SIZE;
@@ -146,14 +146,12 @@ fn init_node(mut block: WriteProxy, is_leaf: bool) -> Result<WNode> {
 
     // initialise the block
     let mut w = std::io::Cursor::new(block.rw());
-    write_block_header(
-        &mut w,
-        BlockHeader {
-            loc,
-            kind: NODE_KIND,
-            sum: 0,
-        },
-    )?;
+    let hdr = BlockHeader {
+        loc,
+        kind: BNODE_KIND,
+        sum: 0,
+    };
+    write_block_header(&mut w, &hdr)?;
 
     write_node_header(
         &mut w,
@@ -183,7 +181,7 @@ impl BTree {
 
     pub fn empty_tree(tm: Arc<TransactionManager>) -> Result<Self> {
         let root = {
-            let root = tm.new_block()?;
+            let root = tm.new_block(&BNODE_KIND)?;
             let root = init_node(root, true)?;
             root.loc
         };
@@ -196,7 +194,7 @@ impl BTree {
     }
 
     pub fn lookup(&self, key: u32) -> Option<u32> {
-        let mut block = self.tm.read(self.root).unwrap();
+        let mut block = self.tm.read(self.root, &BNODE_KIND).unwrap();
 
         loop {
             let node = Node::new(block.loc, block);
@@ -211,7 +209,7 @@ impl BTree {
             }
 
             let child = node.values.get(idx as usize);
-            block = self.tm.read(child).unwrap();
+            block = self.tm.read(child, &BNODE_KIND).unwrap();
         }
     }
 
@@ -365,7 +363,7 @@ impl BTree {
     }
 
     fn get_loc_free_space_(&self, loc: u32) -> usize {
-        let block = self.tm.read(loc).unwrap();
+        let block = self.tm.read(loc, &BNODE_KIND).unwrap();
         let node = r_node(block);
         self.get_node_free_space_(&node)
     }

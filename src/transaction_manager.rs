@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 
 use crate::block_allocator::*;
 use crate::block_cache::*;
+use crate::block_kinds::*;
 use crate::byte_types::*;
 
 use std::sync::{Arc, Mutex};
@@ -24,7 +25,7 @@ const SUPERBLOCK_LOC: u32 = 0;
 
 impl TransactionManager_ {
     fn new(allocator: Arc<Mutex<BlockAllocator>>, cache: Arc<MetadataCache>) -> Self {
-        let superblock = cache.write_lock(SUPERBLOCK_LOC).unwrap();
+        let superblock = cache.write_lock(SUPERBLOCK_LOC, &SUPERBLOCK_KIND).unwrap();
         Self {
             allocator,
             cache,
@@ -48,7 +49,7 @@ impl TransactionManager_ {
         // FIXME: finish
 
         // get superblock for next transaction
-        self.superblock = Some(self.cache.write_lock(SUPERBLOCK_LOC)?);
+        self.superblock = Some(self.cache.write_lock(SUPERBLOCK_LOC, &SUPERBLOCK_KIND)?);
 
         // clear shadows
         self.shadows.clear();
@@ -65,14 +66,14 @@ impl TransactionManager_ {
         self.superblock.as_ref().unwrap()
     }
 
-    fn read(&self, loc: u32) -> Result<ReadProxy> {
-        let b = self.cache.read_lock(loc)?;
+    fn read(&self, loc: u32, kind: &Kind) -> Result<ReadProxy> {
+        let b = self.cache.read_lock(loc, kind)?;
         Ok(b)
     }
 
-    fn new_block(&mut self) -> Result<WriteProxy> {
+    fn new_block(&mut self, kind: &Kind) -> Result<WriteProxy> {
         if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
-            let b = self.cache.zero_lock(loc)?;
+            let b = self.cache.zero_lock(loc, kind)?;
             self.shadows.insert(loc);
             Ok(b)
         } else {
@@ -82,12 +83,12 @@ impl TransactionManager_ {
         }
     }
 
-    fn shadow(&mut self, loc: u32) -> Result<WriteProxy> {
+    fn shadow(&mut self, loc: u32, kind: &Kind) -> Result<WriteProxy> {
         if self.shadows.contains(&loc) {
-            Ok(self.cache.write_lock(loc)?)
+            Ok(self.cache.write_lock(loc, kind)?)
         } else if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
-            let old = self.cache.read_lock(loc)?;
-            let mut new = self.cache.zero_lock(loc)?;
+            let old = self.cache.read_lock(loc, kind)?;
+            let mut new = self.cache.zero_lock(loc, kind)?;
             self.shadows.insert(loc);
             new.rw().copy_from_slice(old.r());
             Ok(new)
@@ -129,19 +130,19 @@ impl TransactionManager {
         inner.superblock().clone()
     }
 
-    pub fn read(&self, loc: u32) -> Result<ReadProxy> {
+    pub fn read(&self, loc: u32, kind: &Kind) -> Result<ReadProxy> {
         let inner = self.inner.lock().unwrap();
-        inner.read(loc)
+        inner.read(loc, kind)
     }
 
-    pub fn new_block(&self) -> Result<WriteProxy> {
+    pub fn new_block(&self, kind: &Kind) -> Result<WriteProxy> {
         let mut inner = self.inner.lock().unwrap();
-        inner.new_block()
+        inner.new_block(kind)
     }
 
-    pub fn shadow(&self, loc: u32) -> Result<WriteProxy> {
+    pub fn shadow(&self, loc: u32, kind: &Kind) -> Result<WriteProxy> {
         let mut inner = self.inner.lock().unwrap();
-        inner.shadow(loc)
+        inner.shadow(loc, kind)
     }
 
     pub fn inc_ref(&self, loc: u32) {

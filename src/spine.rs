@@ -1,7 +1,8 @@
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::block_cache::*;
+use crate::block_kinds::*;
 use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
@@ -15,7 +16,7 @@ pub struct Spine {
 
 impl Spine {
     pub fn new(tm: Arc<TransactionManager>, root: u32) -> Result<Self> {
-        let child = tm.shadow(root)?;
+        let child = tm.shadow(root, &BNODE_KIND)?;
         let new_root = child.loc();
 
         Ok(Self {
@@ -35,7 +36,7 @@ impl Spine {
     }
 
     pub fn push(&mut self, loc: u32) -> Result<()> {
-        let mut block = self.tm.shadow(loc)?;
+        let mut block = self.tm.shadow(loc, &BNODE_KIND)?;
         std::mem::swap(&mut block, &mut self.child);
         self.parent = Some(block);
         Ok(())
@@ -46,20 +47,20 @@ impl Spine {
     }
 
     pub fn replace_child_loc(&mut self, loc: u32) -> Result<()> {
-        let block = self.tm.shadow(loc)?;
+        let block = self.tm.shadow(loc, &BNODE_KIND)?;
         self.child = block;
         Ok(())
     }
 
     pub fn peek(&self, loc: u32) -> Result<ReadProxy> {
-        let block = self.tm.read(loc)?;
+        let block = self.tm.read(loc, &BNODE_KIND)?;
         Ok(block)
     }
 
     // Used for temporary writes, such as siblings for rebalancing.
     // We can always use replace_child() to put them on the spine.
     pub fn shadow(&mut self, loc: u32) -> Result<WriteProxy> {
-        let block = self.tm.shadow(loc)?;
+        let block = self.tm.shadow(loc, &BNODE_KIND)?;
         Ok(block)
     }
 
@@ -75,7 +76,7 @@ impl Spine {
     }
 
     pub fn new_block(&self) -> Result<WriteProxy> {
-        self.tm.new_block()
+        self.tm.new_block(&BNODE_KIND)
     }
 }
 
