@@ -1,48 +1,60 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use crc32c::crc32c;
+use linked_hash_map::*;
 use std::collections::BTreeMap;
-use std::io::Result;
+use std::io::{self, Result};
 use std::io::{Read, Write};
-use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use thinp::io_engine::*;
 
 use crate::byte_types::*;
-use crate::lru::*;
 
 //-------------------------------------------------------------------------
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct Kind(pub u32);
 
 // All blocks begin with this header.  The is automatically calculated by
 // the cache just before it writes the block to disk.  Similarly the checksum
 // will be verified by the cache when it reads the block from disk.
 pub struct BlockHeader {
-    pub loc: u32,
-    pub kind: u32,
     pub sum: u32,
+    pub loc: u32,
+    pub kind: Kind,
 }
 
 pub const BLOCK_HEADER_SIZE: usize = 16;
 pub const BLOCK_PAYLOAD_SIZE: usize = 4096 - BLOCK_HEADER_SIZE;
 
 pub fn read_block_header<R: Read>(r: &mut R) -> Result<BlockHeader> {
-    let loc = r.read_u32::<LittleEndian>()?;
-    let kind = r.read_u32::<LittleEndian>()?;
-    let _padding = r.read_u32::<LittleEndian>()?;
     let sum = r.read_u32::<LittleEndian>()?;
+    let loc = r.read_u32::<LittleEndian>()?;
+    let kind = Kind(r.read_u32::<LittleEndian>()?);
+    let _padding = r.read_u32::<LittleEndian>()?;
 
     Ok(BlockHeader { loc, kind, sum })
 }
 
-pub fn write_block_header<W: Write>(w: &mut W, hdr: BlockHeader) -> Result<()> {
-    w.write_u32::<LittleEndian>(hdr.loc)?;
-    w.write_u32::<LittleEndian>(hdr.kind)?;
-    w.write_u32::<LittleEndian>(0)?;
+pub fn write_block_header<W: Write>(w: &mut W, hdr: &BlockHeader) -> Result<()> {
     w.write_u32::<LittleEndian>(hdr.sum)?;
+    w.write_u32::<LittleEndian>(hdr.loc)?;
+    w.write_u32::<LittleEndian>(hdr.kind.0)?;
+    w.write_u32::<LittleEndian>(0)?;
 
     Ok(())
 }
 
+fn checksum_(data: &[u8]) -> u32 {
+    crc32c(&data[4..]) ^ 0xffffffff
+}
+
+fn fail_(msg: String) -> Result<()> {
+    Err(io::Error::new(io::ErrorKind::Other, msg))
+}
+
 //-------------------------------------------------------------------------
 
+#[derive(Eq, PartialEq)]
 enum LockState {
     Unlocked,
     Read(usize),
@@ -53,6 +65,7 @@ struct EntryInner {
     lock: LockState,
     dirty: bool,
     block: Block,
+    kind: Kind,
 }
 
 struct CacheEntry {
@@ -61,44 +74,38 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    fn new_read(block: Block) -> CacheEntry {
+    fn new_read(block: Block, kind: &Kind) -> CacheEntry {
         CacheEntry {
             inner: Mutex::new(EntryInner {
                 lock: LockState::Read(1),
                 dirty: false,
                 block,
+                kind: kind.clone(),
             }),
             cond: Condvar::new(),
         }
     }
 
-    fn new_write(block: Block) -> CacheEntry {
+    fn new_write(block: Block, kind: &Kind) -> CacheEntry {
         CacheEntry {
             inner: Mutex::new(EntryInner {
                 lock: LockState::Write,
                 dirty: true,
                 block,
+                kind: kind.clone(),
             }),
             cond: Condvar::new(),
         }
     }
 
-    /*
-    fn is_held(&self) -> bool {
-        use LockState::*;
-
-        let inner = self.inner.lock().unwrap();
-        match inner.lock {
-            Unlocked => false,
-            Read(_) => true,
-            Write => true,
-        }
-    }
-    */
-
     fn is_dirty(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.dirty
+    }
+
+    fn is_held(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.lock != LockState::Unlocked
     }
 
     // Returns true on success, if false you will need to wait for the lock
@@ -164,25 +171,32 @@ enum LockResult {
     Busy(Arc<CacheEntry>),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum PushResult {
+    AlreadyPresent,
+    Added,
+    AddAndEvict(u32),
+}
+
 struct MetadataCacheInner {
     nr_blocks: u32,
     nr_held: usize,
-    engine: SyncIoEngine,
+    capacity: usize,
+    engine: Arc<dyn IoEngine>,
 
     // The LRU lists only contain blocks that are not currently locked.
-    lru: LRU,
+    lru: LinkedHashMap<u32, u32>,
     cache: BTreeMap<u32, Arc<CacheEntry>>,
 }
-
 impl MetadataCacheInner {
-    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> Result<Self> {
-        let engine = SyncIoEngine::new(path, true)?;
+    pub fn new(engine: Arc<dyn IoEngine>, capacity: usize) -> Result<Self> {
         let nr_blocks = engine.get_nr_blocks() as u32;
         Ok(Self {
             nr_blocks,
             nr_held: 0,
+            capacity,
             engine,
-            lru: LRU::with_capacity(capacity),
+            lru: LinkedHashMap::new(),
             cache: BTreeMap::new(),
         })
     }
@@ -195,8 +209,27 @@ impl MetadataCacheInner {
         self.nr_held
     }
 
+    pub fn residency(&self) -> usize {
+        self.lru.len()
+    }
+
+    fn lru_push_(&mut self, loc: u32) -> PushResult {
+        use PushResult::*;
+
+        if self.lru.contains_key(&loc) {
+            AlreadyPresent
+        } else if self.lru.len() < self.capacity {
+            self.lru.insert(loc, loc);
+            Added
+        } else {
+            let old = self.lru.pop_front().unwrap();
+            self.lru.insert(loc, loc);
+            AddAndEvict(old.1)
+        }
+    }
+
     fn insert_lru_(&mut self, loc: u32) -> Result<()> {
-        match self.lru.push(loc) {
+        match self.lru_push_(loc) {
             PushResult::AlreadyPresent => {
                 panic!("AlreadyPresent")
             }
@@ -215,27 +248,56 @@ impl MetadataCacheInner {
     }
 
     fn remove_lru_(&mut self, loc: u32) {
-        self.lru.remove(loc);
+        self.lru.remove(&loc);
     }
 
-    fn verify_(&self, _block: &Block) -> Result<()> {
-        todo!();
+    fn verify_(&self, block: &Block, kind: &Kind) -> Result<()> {
+        let mut r = std::io::Cursor::new(block.get_data());
+        let hdr = read_block_header(&mut r)?;
+
+        if hdr.loc != block.loc as u32 {
+            return fail_(format!(
+                "verify failed: block.loc {} != hdr.loc {}",
+                block.loc, hdr.loc
+            ));
+        }
+
+        if hdr.kind != *kind {
+            return fail_(format!(
+                "verify failed: hdr.kind {} != kind {}",
+                hdr.kind.0, kind.0
+            ));
+        }
+
+        Ok(())
     }
 
-    fn prep_(&self, _block: &mut [u8]) {
-        todo!();
+    fn prep_(&self, block: &Block, kind: &Kind) -> Result<()> {
+        let hdr = BlockHeader {
+            sum: 0,
+            loc: block.loc as u32,
+            kind: kind.clone(),
+        };
+
+        let mut w = std::io::Cursor::new(block.get_data());
+        write_block_header(&mut w, &hdr)?;
+
+        let sum = checksum_(&block.get_data()[4..]);
+        let mut w = std::io::Cursor::new(block.get_data());
+        w.write_u32::<LittleEndian>(sum)?;
+
+        Ok(())
     }
 
-    fn read_(&mut self, loc: u32) -> Result<Block> {
+    fn read_(&mut self, loc: u32, kind: &Kind) -> Result<Block> {
         let block = self.engine.read(loc as u64)?;
-        self.verify_(&block)?;
+        self.verify_(&block, kind)?;
         Ok(block)
     }
 
     fn writeback_(&self, entry: &CacheEntry) -> Result<()> {
         let inner = entry.inner.lock().unwrap();
-        let mut data = inner.block.get_data();
-        self.prep_(&mut data);
+        self.prep_(&inner.block, &inner.kind)?;
         self.engine.write(&inner.block)?;
         Ok(())
     }
@@ -248,7 +310,7 @@ impl MetadataCacheInner {
     }
 
     // Returns true on success
-    pub fn read_lock(&mut self, loc: u32) -> Result<LockResult> {
+    pub fn read_lock(&mut self, loc: u32, kind: &Kind) -> Result<LockResult> {
         use LockResult::*;
 
         if let Some(entry) = self.cache.get_mut(&loc).cloned() {
@@ -259,13 +321,13 @@ impl MetadataCacheInner {
                 Ok(Busy(entry.clone()))
             }
         } else {
-            let entry = Arc::new(CacheEntry::new_read(self.read_(loc)?));
+            let entry = Arc::new(CacheEntry::new_read(self.read_(loc, kind)?, kind));
             self.cache.insert(loc, entry.clone());
             Ok(Locked(entry.clone()))
         }
     }
 
-    pub fn write_lock(&mut self, loc: u32) -> Result<LockResult> {
+    pub fn write_lock(&mut self, loc: u32, kind: &Kind) -> Result<LockResult> {
         use LockResult::*;
 
         if let Some(entry) = self.cache.get_mut(&loc).cloned() {
@@ -276,14 +338,14 @@ impl MetadataCacheInner {
                 Ok(Busy(entry.clone()))
             }
         } else {
-            let entry = Arc::new(CacheEntry::new_write(self.read_(loc)?));
+            let entry = Arc::new(CacheEntry::new_write(self.read_(loc, kind)?, kind));
             self.cache.insert(loc, entry.clone());
             Ok(Locked(entry.clone()))
         }
     }
 
     ///! Write lock and zero the data (avoids reading the block)
-    pub fn zero_lock(&mut self, loc: u32) -> Result<LockResult> {
+    pub fn zero_lock(&mut self, loc: u32, kind: &Kind) -> Result<LockResult> {
         use LockResult::*;
 
         if let Some(entry) = self.cache.get_mut(&loc).cloned() {
@@ -300,28 +362,21 @@ impl MetadataCacheInner {
             }
         } else {
             let block = Block::zeroed(loc as u64);
-            let entry = Arc::new(CacheEntry::new_write(block));
+            let entry = Arc::new(CacheEntry::new_write(block, kind));
             self.cache.insert(loc, entry.clone());
             Ok(Locked(entry.clone()))
         }
     }
 
     /// Writeback all dirty blocks
-    pub fn flush(&mut self) {
-        let mut writebacks = Vec::new();
-        for (loc, entry) in &self.cache {
-            if entry.is_dirty() {
-                writebacks.push(*loc);
+    pub fn flush(&mut self) -> Result<()> {
+        for (_loc, entry) in &self.cache {
+            if !entry.is_held() && entry.is_dirty() {
+                self.writeback_(&*entry)?;
             }
         }
 
-        for loc in writebacks {
-            if let Some(entry) = self.cache.get_mut(&loc).cloned() {
-                self.writeback_(&entry).expect("flush: writeback failed");
-            } else {
-                panic!("flush: block disappeared");
-            }
-        }
+        Ok(())
     }
 }
 
@@ -413,9 +468,16 @@ pub struct MetadataCache {
     inner: Mutex<MetadataCacheInner>,
 }
 
+impl Drop for MetadataCache {
+    fn drop(&mut self) {
+        self.flush()
+            .expect("flush failed when dropping metadata cache");
+    }
+}
+
 impl MetadataCache {
-    pub fn new<P: AsRef<Path>>(path: P, capacity: usize) -> Result<Self> {
-        let inner = MetadataCacheInner::new(path, capacity)?;
+    pub fn new(engine: Arc<dyn IoEngine>, capacity: usize) -> Result<Self> {
+        let inner = MetadataCacheInner::new(engine, capacity)?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
@@ -431,13 +493,18 @@ impl MetadataCache {
         inner.nr_held()
     }
 
-    pub fn read_lock(self: &Arc<Self>, loc: u32) -> Result<ReadProxy> {
+    pub fn residency(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.residency()
+    }
+
+    pub fn read_lock(self: &Arc<Self>, loc: u32, kind: &Kind) -> Result<ReadProxy> {
         use LockResult::*;
 
         let mut inner = self.inner.lock().unwrap();
 
         loop {
-            match inner.read_lock(loc)? {
+            match inner.read_lock(loc, kind)? {
                 Locked(entry) => {
                     return Ok(ReadProxy {
                         loc,
@@ -452,13 +519,13 @@ impl MetadataCache {
         }
     }
 
-    pub fn write_lock(self: &Arc<Self>, loc: u32) -> Result<WriteProxy> {
+    pub fn write_lock(self: &Arc<Self>, loc: u32, kind: &Kind) -> Result<WriteProxy> {
         use LockResult::*;
 
         let mut inner = self.inner.lock().unwrap();
 
         loop {
-            match inner.write_lock(loc)? {
+            match inner.write_lock(loc, kind)? {
                 Locked(entry) => {
                     return Ok(WriteProxy {
                         inner: ReadProxy {
@@ -476,13 +543,13 @@ impl MetadataCache {
     }
 
     ///! Write lock and zero the data (avoids reading the block)
-    pub fn zero_lock(self: &Arc<Self>, loc: u32) -> Result<WriteProxy> {
+    pub fn zero_lock(self: &Arc<Self>, loc: u32, kind: &Kind) -> Result<WriteProxy> {
         use LockResult::*;
 
         let mut inner = self.inner.lock().unwrap();
 
         loop {
-            match inner.zero_lock(loc)? {
+            match inner.zero_lock(loc, kind)? {
                 Locked(entry) => {
                     return Ok(WriteProxy {
                         inner: ReadProxy {
@@ -500,9 +567,9 @@ impl MetadataCache {
     }
 
     /// Writeback all dirty blocks
-    pub fn flush(&self) {
+    pub fn flush(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.flush();
+        inner.flush()
     }
 
     // for use by the proxies only
@@ -517,3 +584,130 @@ impl MetadataCache {
         let _ = entry.cond.wait(inner);
     }
 }
+
+//-------------------------------------------------------------------------
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::core::*;
+    use anyhow::{ensure, Result};
+    use std::io;
+    use std::sync::Arc;
+
+    fn stamp(data: &mut [u8], byte: u8) -> Result<()> {
+        let len = data.len();
+        let mut w = io::Cursor::new(data);
+
+        // FIXME: there must be a std function for this
+        for _ in 0..len {
+            w.write_u8(byte)?;
+        }
+
+        Ok(())
+    }
+
+    fn verify(data: &[u8], byte: u8) {
+        for i in BLOCK_HEADER_SIZE..data.len() {
+            assert!(data[i] == byte);
+        }
+    }
+
+    fn mk_engine(nr_blocks: u32) -> Arc<dyn IoEngine> {
+        Arc::new(CoreIoEngine::new(nr_blocks as u64))
+    }
+
+    #[test]
+    fn test_create() -> Result<()> {
+        let engine = mk_engine(16);
+        let _cache = Arc::new(MetadataCache::new(engine, 16)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_block() -> Result<()> {
+        let engine = mk_engine(16);
+        let cache = Arc::new(MetadataCache::new(engine, 16)?);
+        let mut wp = cache.zero_lock(0, &Kind(17))?;
+        stamp(wp.rw(), 21)?;
+        drop(wp);
+
+        cache.flush()?;
+
+        let rp = cache.read_lock(0, &Kind(17))?;
+
+        let data = rp.r();
+        verify(data, 21);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rolling_writes() -> Result<()> {
+        let nr_blocks = 1024u32;
+        let engine = mk_engine(nr_blocks);
+
+        {
+            const CACHE_SIZE: usize = 16;
+            let cache = Arc::new(MetadataCache::new(engine.clone(), CACHE_SIZE)?);
+
+            for i in 0..nr_blocks {
+                let mut wp = cache.zero_lock(i, &Kind(17))?;
+                stamp(wp.rw(), i as u8)?;
+                ensure!(cache.residency() <= CACHE_SIZE);
+            }
+        }
+
+        {
+            let cache = Arc::new(MetadataCache::new(engine, 16)?);
+
+            for i in 0..nr_blocks {
+                let rp = cache.read_lock(i, &Kind(17))?;
+                verify(rp.r(), i as u8);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_twice() -> Result<()> {
+        let nr_blocks = 1024u32;
+        let engine = mk_engine(nr_blocks);
+
+        {
+            const CACHE_SIZE: usize = 16;
+            let cache = Arc::new(MetadataCache::new(engine.clone(), CACHE_SIZE)?);
+
+            for i in 0..nr_blocks {
+                let mut wp = cache.zero_lock(i, &Kind(17))?;
+                stamp(wp.rw(), i as u8)?;
+                ensure!(cache.residency() <= CACHE_SIZE);
+            }
+        }
+
+        {
+            const CACHE_SIZE: usize = 16;
+            let cache = Arc::new(MetadataCache::new(engine.clone(), CACHE_SIZE)?);
+
+            for i in 0..nr_blocks {
+                let mut wp = cache.zero_lock(i, &Kind(17))?;
+                stamp(wp.rw(), (i * 3) as u8)?;
+                ensure!(cache.residency() <= CACHE_SIZE);
+            }
+        }
+
+        {
+            let cache = Arc::new(MetadataCache::new(engine, 16)?);
+
+            for i in 0..nr_blocks {
+                let rp = cache.read_lock(i, &Kind(17))?;
+                verify(rp.r(), (i * 3) as u8);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+//-------------------------------------------------------------------------
