@@ -148,7 +148,7 @@ impl CacheEntry {
         let mut inner = self.inner.lock().unwrap();
         match inner.lock {
             Unlocked => {
-                panic!("Unlocking an unlocked block");
+                panic!("Unlocking an unlocked block {}", inner.block.loc);
             }
             Read(1) => {
                 inner.lock = Unlocked;
@@ -410,20 +410,25 @@ impl Readable for ReadProxy {
         &inner.block.get_data()[self.begin..self.end]
     }
 
+    // FIXME: should split_at consume self?
     fn split_at(&self, offset: usize) -> (Self, Self) {
-        assert!(offset < (self.begin - self.end));
+        assert!(offset < (self.end - self.begin));
+        eprintln!(
+            "begin = {}, end = {}, offset = {}",
+            self.begin, self.end, offset
+        );
         (
             Self {
                 loc: self.loc,
                 cache: self.cache.clone(),
                 begin: self.begin,
-                end: offset,
+                end: self.begin + offset,
                 entry: self.entry.clone(),
             },
             Self {
                 loc: self.loc,
                 cache: self.cache.clone(),
-                begin: offset,
+                begin: self.begin + offset,
                 end: self.end,
                 entry: self.entry.clone(),
             },

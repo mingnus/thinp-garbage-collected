@@ -25,6 +25,8 @@ impl<Data> U32<Data> {
 
 impl<Data: Readable> U32<Data> {
     pub fn get(&self) -> u32 {
+        let len = self.data.r().len();
+        eprintln!("get len = {}", len);
         let mut data = std::io::Cursor::new(self.data.r());
         data.read_u32::<LittleEndian>().unwrap()
     }

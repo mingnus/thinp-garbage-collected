@@ -34,7 +34,7 @@ impl TransactionManager_ {
         }
     }
 
-    fn commit_transaction(&mut self) -> Result<()> {
+    fn commit(&mut self) -> Result<()> {
         // quiesce the gc
         self.allocator.lock().unwrap().gc_quiesce();
 
@@ -60,7 +60,7 @@ impl TransactionManager_ {
         Ok(())
     }
 
-    fn abort_transaction(&mut self) {}
+    fn abort(&mut self) {}
 
     fn superblock(&mut self) -> &WriteProxy {
         self.superblock.as_ref().unwrap()
@@ -73,7 +73,9 @@ impl TransactionManager_ {
 
     fn new_block(&mut self, kind: &Kind) -> Result<WriteProxy> {
         if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
+            eprintln!("allocated {}", loc);
             let b = self.cache.zero_lock(loc, kind)?;
+            eprintln!("zero locked");
             self.shadows.insert(loc);
             Ok(b)
         } else {
@@ -115,14 +117,14 @@ impl TransactionManager {
         }
     }
 
-    pub fn commit_transaction(&self) -> Result<()> {
+    pub fn commit(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.commit_transaction()
+        inner.commit()
     }
 
-    pub fn abort_transaction(&self) {
+    pub fn abort(&self) {
         let mut inner = self.inner.lock().unwrap();
-        inner.abort_transaction()
+        inner.abort()
     }
 
     pub fn superblock(&self) -> WriteProxy {

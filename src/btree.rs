@@ -66,6 +66,7 @@ impl<Data: Readable> Node<Data> {
         let (_, data) = data.split_at(BLOCK_HEADER_SIZE);
         let (flags, data) = data.split_at(4);
         let (nr_entries, data) = data.split_at(4);
+        assert!(nr_entries.r().len() == 4);
         let (keys, values) = data.split_at(MAX_ENTRIES * 4);
 
         let flags = U32::new(flags);
@@ -509,4 +510,43 @@ impl BTree {
     }
 }
 
+//-------------------------------------------------------------------------
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::block_allocator::*;
+    use crate::block_cache::*;
+    use crate::core::*;
+    use anyhow::{ensure, Result};
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use thinp::io_engine::*;
+
+    fn mk_engine(nr_blocks: u32) -> Arc<dyn IoEngine> {
+        Arc::new(CoreIoEngine::new(nr_blocks as u64))
+    }
+
+    fn mk_allocator(cache: Arc<MetadataCache>, nr_data_blocks: u64) -> Arc<Mutex<BlockAllocator>> {
+        let mut allocator = BlockAllocator::new(cache, nr_data_blocks);
+        allocator.allocate_metadata_specific(0); // reserve the superblock
+        Arc::new(Mutex::new(allocator))
+    }
+
+    #[test]
+    fn empty_btree() -> Result<()> {
+        const NR_BLOCKS: u32 = 1024;
+        const NR_DATA_BLOCKS: u64 = 102400;
+        let engine = mk_engine(NR_BLOCKS);
+        let cache = Arc::new(MetadataCache::new(engine, 16)?);
+        let allocator = mk_allocator(cache.clone(), NR_DATA_BLOCKS);
+        let tm = Arc::new(TransactionManager::new(allocator, cache));
+        let tree = BTree::empty_tree(tm.clone());
+        drop(tree);
+
+        tm.commit()?;
+
+        Ok(())
+    }
+}
 //-------------------------------------------------------------------------
