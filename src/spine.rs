@@ -36,6 +36,11 @@ impl Spine {
     }
 
     pub fn push(&mut self, loc: u32) -> Result<()> {
+        // FIXME: remove
+        if let Some(parent) = &self.parent {
+            assert!(parent.loc() != loc);
+        }
+
         let mut block = self.tm.shadow(loc, &BNODE_KIND)?;
         std::mem::swap(&mut block, &mut self.child);
         self.parent = Some(block);
@@ -47,6 +52,7 @@ impl Spine {
     }
 
     pub fn replace_child_loc(&mut self, loc: u32) -> Result<()> {
+        assert!(loc != self.child.loc());
         let block = self.tm.shadow(loc, &BNODE_KIND)?;
         self.child = block;
         Ok(())

@@ -39,11 +39,11 @@ impl TransactionManager_ {
         self.allocator.lock().unwrap().gc_quiesce();
 
         // FIXME: check that only the superblock is held
-        self.cache.flush();
+        self.cache.flush()?;
 
         // writeback the superblock
         self.superblock = None;
-        self.cache.flush();
+        self.cache.flush()?;
 
         // set new roots ready for next gc
         // FIXME: finish
@@ -73,9 +73,7 @@ impl TransactionManager_ {
 
     fn new_block(&mut self, kind: &Kind) -> Result<WriteProxy> {
         if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
-            eprintln!("allocated {}", loc);
             let b = self.cache.zero_lock(loc, kind)?;
-            eprintln!("zero locked");
             self.shadows.insert(loc);
             Ok(b)
         } else {
@@ -85,14 +83,16 @@ impl TransactionManager_ {
         }
     }
 
-    fn shadow(&mut self, loc: u32, kind: &Kind) -> Result<WriteProxy> {
-        if self.shadows.contains(&loc) {
-            Ok(self.cache.write_lock(loc, kind)?)
+    fn shadow(&mut self, old_loc: u32, kind: &Kind) -> Result<WriteProxy> {
+        if self.shadows.contains(&old_loc) {
+            Ok(self.cache.write_lock(old_loc, kind)?)
         } else if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
-            let old = self.cache.read_lock(loc, kind)?;
+            let old = self.cache.read_lock(old_loc, kind)?;
             let mut new = self.cache.zero_lock(loc, kind)?;
             self.shadows.insert(loc);
-            new.rw().copy_from_slice(old.r());
+
+            // We're careful not to touch the block header
+            (&mut new.rw()[BLOCK_HEADER_SIZE..]).copy_from_slice(&old.r()[BLOCK_HEADER_SIZE..]);
             Ok(new)
         } else {
             Err(anyhow::anyhow!("out of metadata blocks"))

@@ -26,7 +26,6 @@ impl<Data> U32<Data> {
 impl<Data: Readable> U32<Data> {
     pub fn get(&self) -> u32 {
         let len = self.data.r().len();
-        eprintln!("get len = {}", len);
         let mut data = std::io::Cursor::new(self.data.r());
         data.read_u32::<LittleEndian>().unwrap()
     }
@@ -69,6 +68,10 @@ impl<Data: Readable> U32Array<Data> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.nr_entries
+    }
+
     pub fn check_idx(&self, idx: usize) {
         assert!(idx < self.nr_entries);
     }
@@ -81,11 +84,19 @@ impl<Data: Readable> U32Array<Data> {
     }
 
     pub fn bsearch(&self, key: u32) -> isize {
+        if self.nr_entries == 0 {
+            return -1;
+        }
+
         let mut lo = -1;
         let mut hi = self.nr_entries as isize;
-
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
+
+            if mid == lo {
+                return mid;
+            }
+
             let mid_key = self.get(mid as usize);
 
             if key < mid_key {
@@ -136,17 +147,21 @@ impl<Data: Writeable> U32Array<Data> {
     }
 
     pub fn insert_at(&mut self, idx: usize, value: u32) {
-        self.data
-            .rw()
-            .copy_within(byte(idx)..byte(self.nr_entries), byte(idx + 1));
+        if idx < self.nr_entries {
+            self.data
+                .rw()
+                .copy_within(byte(idx)..byte(self.nr_entries), byte(idx + 1));
+        }
         self.nr_entries += 1;
         self.set(idx, value);
     }
 
     pub fn remove_at(&mut self, idx: usize) {
-        self.data
-            .rw()
-            .copy_within(byte(idx + 1)..byte(self.nr_entries), byte(idx));
+        if idx < self.nr_entries - 1 {
+            self.data
+                .rw()
+                .copy_within(byte(idx + 1)..byte(self.nr_entries), byte(idx));
+        }
         self.nr_entries -= 1;
     }
 
@@ -161,9 +176,10 @@ impl<Data: Writeable> U32Array<Data> {
 
     pub fn append(&mut self, values: &[u32]) {
         assert!(self.nr_entries + values.len() <= self.max_entries);
+        let nr_entries = self.nr_entries;
         self.nr_entries += values.len();
         for (i, v) in values.iter().enumerate() {
-            self.set(self.nr_entries + i, *v);
+            self.set(nr_entries + i, *v);
         }
     }
 }

@@ -12,6 +12,7 @@ use crate::transaction_manager::TransactionManager;
 
 type ThinID = u64;
 
+#[allow(dead_code)]
 struct Pool {
     // data_extent_allocator: ExtentAllocator,
     allocator: BlockAllocator, // This manages both metadata and data blocks.
@@ -19,11 +20,13 @@ struct Pool {
     tm: Arc<TransactionManager>,
 }
 
+#[allow(dead_code)]
 struct ThinDevice {
     pool: Arc<Mutex<Pool>>,
     id: ThinID,
 }
 
+#[allow(dead_code)]
 impl Pool {
     pub fn new<P: AsRef<Path>>(_path: P, _data_block_size: u64, _format: bool) -> Self {
         todo!();
@@ -112,11 +115,13 @@ impl Drop for Pool {
     }
 }
 
+#[allow(dead_code)]
 struct LookupResult {
     block: u64,
     shared: bool,
 }
 
+#[allow(dead_code)]
 struct RangeResult {
     thin_begin: u64,
     thin_end: u64,
@@ -124,6 +129,7 @@ struct RangeResult {
     maybe_shared: bool,
 }
 
+#[allow(dead_code)]
 impl ThinDevice {
     pub fn get_id(&self) -> ThinID {
         todo!();

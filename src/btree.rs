@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -13,8 +14,6 @@ use crate::transaction_manager::*;
 
 const NODE_HEADER_SIZE: usize = 8;
 const MAX_ENTRIES: usize = (BLOCK_PAYLOAD_SIZE - NODE_HEADER_SIZE) / 8;
-// const KEYS_OFFSET: usize = NODE_HEADER_SIZE + BLOCK_HEADER_SIZE;
-// const VALUES_OFFSET: usize = KEYS_OFFSET + MAX_ENTRIES * 4;
 const SPACE_THRESHOLD: usize = 8;
 
 enum BTreeFlags {
@@ -112,13 +111,13 @@ impl<Data: Writeable> Node<Data> {
     fn prepend(&mut self, keys: &[u32], values: &[u32]) {
         self.keys.prepend(keys);
         self.values.prepend(values);
-        self.nr_entries.dec(keys.len() as u32);
+        self.nr_entries.inc(keys.len() as u32);
     }
 
     fn append(&mut self, keys: &[u32], values: &[u32]) {
         self.keys.append(keys);
         self.values.append(values);
-        self.nr_entries.dec(keys.len() as u32);
+        self.nr_entries.inc(keys.len() as u32);
     }
 
     fn remove_right(&mut self, count: usize) -> (Vec<u32>, Vec<u32>) {
@@ -135,15 +134,15 @@ type WNode = Node<WriteProxy>;
 //-------------------------------------------------------------------------
 
 fn w_node(block: WriteProxy) -> WNode {
-    Node::new(block.inner.loc, block)
+    Node::new(block.loc(), block)
 }
 
 fn r_node(block: ReadProxy) -> RNode {
-    Node::new(block.loc, block)
+    Node::new(block.loc(), block)
 }
 
 fn init_node(mut block: WriteProxy, is_leaf: bool) -> Result<WNode> {
-    let loc = block.inner.loc;
+    let loc = block.loc();
 
     // initialise the block
     let mut w = std::io::Cursor::new(block.rw());
@@ -198,7 +197,7 @@ impl BTree {
         let mut block = self.tm.read(self.root, &BNODE_KIND).unwrap();
 
         loop {
-            let node = Node::new(block.loc, block);
+            let node = Node::new(block.loc(), block);
 
             let idx = node.keys.bsearch(key);
             if idx < 0 || idx >= node.nr_entries.get() as isize {
@@ -298,13 +297,9 @@ impl BTree {
 
         // setup the parent to point to the two new children
         new_parent.flags.set(BTreeFlags::Internal as u32);
+        assert!(new_parent.keys.len() == 0);
+        assert!(new_parent.values.len() == 0);
         new_parent.append(&vec![lkeys[0], rkeys[0]], &vec![left.loc, right.loc]);
-
-        new_parent.keys.set(0, lkeys[0]);
-        new_parent.values.set(0, left.loc);
-        new_parent.keys.set(1, rkeys[0]);
-        new_parent.values.set(1, right.loc);
-        new_parent.nr_entries.set(1);
 
         // Choose the correct child in the spine
         let left_loc = left.loc;
@@ -371,18 +366,20 @@ impl BTree {
 
     fn split_into_two_(&mut self, spine: &mut Spine, idx: usize, key: u32) -> Result<()> {
         let mut left = w_node(spine.child());
-        let mut right = init_node(spine.new_block()?, left.is_leaf())?;
+        let right_block = spine.new_block()?;
+        let mut right = init_node(right_block.clone(), left.is_leaf())?;
         self.redistribute2_(&mut left, &mut right);
 
         // Adjust the parent keys
         let mut parent = w_node(spine.parent());
-        parent.keys.insert_at(idx, right.keys.get(0));
+
+        parent.keys.insert_at(idx + 1, right.keys.get(0));
         parent.values.insert_at(idx + 1, right.loc);
-        let right_loc = right.loc;
+        parent.nr_entries.inc(1);
 
         // Choose the correct child in the spine
         if key >= right.keys.get(0) {
-            spine.replace_child_loc(right_loc)?;
+            spine.replace_child(right_block);
         }
 
         Ok(())
@@ -488,25 +485,103 @@ impl BTree {
             }
 
             idx = child.keys.bsearch(key);
-            if idx < 0 {
-                child.keys.set(0, key);
-                idx = 0;
-            }
 
             if child.flags.get() == BTreeFlags::Leaf as u32 {
-                child.values.set(idx as usize, value);
+                if idx < 0 {
+                    idx = 0;
+                }
+
+                if idx as usize >= child.keys.len() {
+                    // insert
+                    child.keys.append(&[key]);
+                    child.values.append(&[value]);
+                    child.nr_entries.inc(1);
+                } else {
+                    if child.keys.get(idx as usize) == key {
+                        // overwrite
+                        child.values.set(idx as usize, value);
+                    } else {
+                        child.keys.insert_at(idx as usize + 1, key);
+                        child.values.insert_at(idx as usize + 1, value);
+                        child.nr_entries.inc(1);
+                    }
+                }
+
                 break;
+            } else {
+                if idx < 0 {
+                    // adjust the keys as we go down the spine.
+                    child.keys.set(0, key);
+                    idx = 0;
+                }
+
+                spine.push(child.values.get(idx as usize))?;
+
+                // Patch up the parent
+                let loc = spine.child().loc();
+                let mut p = w_node(spine.parent());
+                p.values.set(idx as usize, loc);
             }
-
-            spine.push(child.values.get(idx as usize))?;
-
-            // Patch up the parent
-            let p = spine.parent();
-            child.values.set(idx as usize, loc);
         }
 
         self.root = spine.get_root();
         Ok(())
+    }
+
+    fn check_(
+        &self,
+        loc: u32,
+        key_min: u32,
+        key_max: Option<u32>,
+        seen: &mut BTreeSet<u32>,
+    ) -> Result<u32> {
+        let mut total = 0;
+
+        ensure!(!seen.contains(&loc));
+        seen.insert(loc);
+
+        let block = self.tm.read(loc, &BNODE_KIND).unwrap();
+        let node = r_node(block);
+
+        // check the keys
+        let mut last = None;
+        for i in 0..node.nr_entries.get() {
+            let k = node.keys.get(i as usize);
+            ensure!(k >= key_min);
+
+            if let Some(key_max) = key_max {
+                ensure!(k < key_max);
+            }
+
+            if let Some(last) = last {
+                ensure!(k > last);
+            }
+            last = Some(k);
+        }
+
+        if node.flags.get() == BTreeFlags::Internal as u32 {
+            for i in 0..node.nr_entries.get() {
+                let kmin = node.keys.get(i as usize);
+                let kmax = if i == node.nr_entries.get() - 1 {
+                    None
+                } else {
+                    Some(node.keys.get(i as usize + 1))
+                };
+                let loc = node.values.get(i as usize);
+                total += self.check_(loc, kmin, kmax, seen)?;
+            }
+        } else {
+            total += node.keys.len() as u32;
+        }
+
+        Ok(total)
+    }
+
+    /// Checks the btree is well formed and returns the number of entries
+    /// in the tree.
+    pub fn check(&self) -> Result<u32> {
+        let mut seen = BTreeSet::new();
+        self.check_(self.root, 0, None, &mut seen)
     }
 }
 
@@ -533,20 +608,118 @@ mod test {
         Arc::new(Mutex::new(allocator))
     }
 
+    #[allow(dead_code)]
+    struct Fixture {
+        engine: Arc<dyn IoEngine>,
+        cache: Arc<MetadataCache>,
+        allocator: Arc<Mutex<BlockAllocator>>,
+        tm: Arc<TransactionManager>,
+        tree: BTree,
+    }
+
+    impl Fixture {
+        fn new(nr_metadata_blocks: u32, nr_data_blocks: u64) -> Result<Self> {
+            let engine = mk_engine(nr_metadata_blocks);
+            let cache = Arc::new(MetadataCache::new(engine.clone(), 16)?);
+            let allocator = mk_allocator(cache.clone(), nr_data_blocks);
+            let tm = Arc::new(TransactionManager::new(allocator.clone(), cache.clone()));
+            let tree = BTree::empty_tree(tm.clone())?;
+
+            Ok(Self {
+                engine,
+                cache,
+                allocator,
+                tm,
+                tree,
+            })
+        }
+
+        fn check(&self) -> Result<u32> {
+            self.tree.check()
+        }
+
+        fn lookup(&self, key: u32) -> Option<u32> {
+            self.tree.lookup(key)
+        }
+
+        fn insert(&mut self, key: u32, value: u32) -> Result<()> {
+            self.tree.insert(key, value)
+        }
+
+        fn commit(&mut self) -> Result<()> {
+            self.tm.commit()
+        }
+    }
+
     #[test]
     fn empty_btree() -> Result<()> {
         const NR_BLOCKS: u32 = 1024;
         const NR_DATA_BLOCKS: u64 = 102400;
-        let engine = mk_engine(NR_BLOCKS);
-        let cache = Arc::new(MetadataCache::new(engine, 16)?);
-        let allocator = mk_allocator(cache.clone(), NR_DATA_BLOCKS);
-        let tm = Arc::new(TransactionManager::new(allocator, cache));
-        let tree = BTree::empty_tree(tm.clone());
-        drop(tree);
 
-        tm.commit()?;
+        let mut fix = Fixture::new(NR_BLOCKS, NR_DATA_BLOCKS)?;
+        fix.commit()?;
 
         Ok(())
     }
+
+    #[test]
+    fn lookup_fails() -> Result<()> {
+        let fix = Fixture::new(1024, 102400)?;
+        ensure!(fix.lookup(0).is_none());
+        ensure!(fix.lookup(1234).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn insert_single() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+
+        fix.insert(0, 100)?;
+        fix.commit()?; // FIXME: shouldn't be needed
+        ensure!(fix.lookup(0) == Some(100));
+
+        Ok(())
+    }
+
+    fn insert_test(keys: &[u32]) -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+
+        fix.commit()?;
+
+        for (i, k) in keys.iter().enumerate() {
+            fix.insert(*k, *k * 2)?;
+            let n = fix.check()?;
+            ensure!(n == i as u32 + 1);
+        }
+
+        fix.commit()?;
+
+        for k in keys {
+            ensure!(fix.lookup(*k) == Some(k * 2));
+        }
+
+        Ok(())
+    }
+    #[test]
+    fn insert_sequence() -> Result<()> {
+        let count = 100000;
+        insert_test(&(0..count).collect::<Vec<u32>>())
+    }
+
+    #[test]
+    fn insert_random() -> Result<()> {
+        use rand::seq::SliceRandom;
+
+        let count = 100000;
+        let mut keys: Vec<u32> = (0..count).collect();
+
+        // shuffle the keys
+        let mut rng = rand::thread_rng();
+        keys.shuffle(&mut rng);
+
+        insert_test(&keys)
+    }
 }
+
 //-------------------------------------------------------------------------

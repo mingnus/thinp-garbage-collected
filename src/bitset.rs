@@ -38,7 +38,7 @@ impl Bitset {
         self.bits.set(bit as usize, false);
     }
 
-    fn find_first_unset(&mut self, mut start: usize, end: usize) -> Option<usize> {
+    fn find_first_unset(&mut self, start: usize, end: usize) -> Option<usize> {
         for i in start..end {
             if !self.bits.contains(i) {
                 return Some(i);
@@ -55,11 +55,7 @@ impl Bitset {
     }
 
     pub fn set_first_clear(&mut self) -> Option<u64> {
-        eprintln!(">>> set_first_clear");
-        let b = self.set_first_clear_in_range(&(0..self.nr_bits));
-        eprintln!("<<< set_first_clear");
-
-        b
+        self.set_first_clear_in_range(&(0..self.nr_bits))
     }
 
     pub fn negate(&mut self) {

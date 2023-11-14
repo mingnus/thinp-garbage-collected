@@ -99,11 +99,11 @@ impl BlockAllocator {
     }
 
     pub fn gc_quiesce(&mut self) {
-        todo!();
+        // FIXME: finish
     }
 
     pub fn gc_resume(&mut self) {
-        todo!();
+        // FIXME: finish
     }
 
     pub fn gc_begin<I>(&mut self, roots: I) -> GCState

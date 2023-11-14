@@ -464,6 +464,7 @@ dependencies = [
  "crc32c",
  "fixedbitset",
  "linked-hash-map",
+ "rand",
  "roaring",
  "thinp",
 ]

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Result};
 use std::io::{Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::ThreadId;
 use thinp::io_engine::*;
 
 use crate::byte_types::*;
@@ -52,13 +53,19 @@ fn fail_(msg: String) -> Result<()> {
     Err(io::Error::new(io::ErrorKind::Other, msg))
 }
 
+fn get_tid_() -> ThreadId {
+    std::thread::current().id()
+}
+
 //-------------------------------------------------------------------------
 
 #[derive(Eq, PartialEq)]
 enum LockState {
     Unlocked,
     Read(usize),
-    Write,
+
+    // We record the thread id so we can spot dead locks
+    Write(ThreadId),
 }
 
 struct EntryInner {
@@ -89,7 +96,7 @@ impl CacheEntry {
     fn new_write(block: Block, kind: &Kind) -> CacheEntry {
         CacheEntry {
             inner: Mutex::new(EntryInner {
-                lock: LockState::Write,
+                lock: LockState::Write(get_tid_()),
                 dirty: true,
                 block,
                 kind: kind.clone(),
@@ -101,6 +108,11 @@ impl CacheEntry {
     fn is_dirty(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.dirty
+    }
+
+    fn clear_dirty(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.dirty = false
     }
 
     fn is_held(&self) -> bool {
@@ -122,7 +134,7 @@ impl CacheEntry {
                 inner.lock = Read(n + 1);
                 true
             }
-            Write => false,
+            Write(_tid) => false,
         }
     }
 
@@ -133,12 +145,17 @@ impl CacheEntry {
         let mut inner = self.inner.lock().unwrap();
         match inner.lock {
             Unlocked => {
-                inner.lock = Write;
+                inner.lock = Write(get_tid_());
                 inner.dirty = true;
                 true
             }
             Read(_) => false,
-            Write => false,
+            Write(tid) => {
+                if tid == get_tid_() {
+                    panic!("thread attempting to lock block {} twice", inner.block.loc);
+                }
+                false
+            }
         }
     }
 
@@ -156,7 +173,8 @@ impl CacheEntry {
             Read(n) => {
                 inner.lock = Read(n - 1);
             }
-            Write => {
+            Write(tid) => {
+                assert!(tid == get_tid_());
                 inner.lock = Unlocked;
             }
         }
@@ -373,6 +391,7 @@ impl MetadataCacheInner {
         for (_loc, entry) in &self.cache {
             if !entry.is_held() && entry.is_dirty() {
                 self.writeback_(&*entry)?;
+                entry.clear_dirty();
             }
         }
 
@@ -382,55 +401,52 @@ impl MetadataCacheInner {
 
 //-------------------------------------------------------------------------
 
+// FIXME: I don't think the proxies should expose the block header
 #[derive(Clone)]
-pub struct ReadProxy {
+pub struct ReadProxy_ {
     pub loc: u32,
-
     cache: Arc<MetadataCache>,
-    begin: usize,
-    end: usize,
     entry: Arc<CacheEntry>,
 }
 
-impl ReadProxy {
-    pub fn loc(&self) -> u32 {
-        self.loc
-    }
-}
-
-impl Drop for ReadProxy {
+impl Drop for ReadProxy_ {
     fn drop(&mut self) {
         self.cache.unlock_(self.loc);
     }
 }
 
+#[derive(Clone)]
+pub struct ReadProxy {
+    proxy: Arc<ReadProxy_>,
+    begin: usize,
+    end: usize,
+}
+
+impl ReadProxy {
+    pub fn loc(&self) -> u32 {
+        self.proxy.loc
+    }
+}
+
 impl Readable for ReadProxy {
     fn r(&self) -> &[u8] {
-        let inner = self.entry.inner.lock().unwrap();
+        let inner = self.proxy.entry.inner.lock().unwrap();
         &inner.block.get_data()[self.begin..self.end]
     }
 
     // FIXME: should split_at consume self?
     fn split_at(&self, offset: usize) -> (Self, Self) {
         assert!(offset < (self.end - self.begin));
-        eprintln!(
-            "begin = {}, end = {}, offset = {}",
-            self.begin, self.end, offset
-        );
         (
             Self {
-                loc: self.loc,
-                cache: self.cache.clone(),
+                proxy: self.proxy.clone(),
                 begin: self.begin,
                 end: self.begin + offset,
-                entry: self.entry.clone(),
             },
             Self {
-                loc: self.loc,
-                cache: self.cache.clone(),
+                proxy: self.proxy.clone(),
                 begin: self.begin + offset,
                 end: self.end,
-                entry: self.entry.clone(),
             },
         )
     }
@@ -439,31 +455,58 @@ impl Readable for ReadProxy {
 //-------------------------------------------------------------------------
 
 #[derive(Clone)]
+pub struct WriteProxy_ {
+    pub loc: u32,
+    cache: Arc<MetadataCache>,
+    entry: Arc<CacheEntry>,
+}
+
+impl Drop for WriteProxy_ {
+    fn drop(&mut self) {
+        self.cache.unlock_(self.loc);
+    }
+}
+
+#[derive(Clone)]
 pub struct WriteProxy {
-    pub inner: ReadProxy,
+    proxy: Arc<WriteProxy_>,
+    begin: usize,
+    end: usize,
 }
 
 impl WriteProxy {
     pub fn loc(&self) -> u32 {
-        self.inner.loc
+        self.proxy.loc
     }
 }
 
 impl Readable for WriteProxy {
     fn r(&self) -> &[u8] {
-        self.inner.r()
+        let inner = self.proxy.entry.inner.lock().unwrap();
+        &inner.block.get_data()[self.begin..self.end]
     }
 
-    fn split_at(&self, loc: usize) -> (Self, Self) {
-        let (a, b) = self.inner.split_at(loc);
-        (Self { inner: a }, Self { inner: b })
+    fn split_at(&self, offset: usize) -> (Self, Self) {
+        assert!(offset < (self.end - self.begin));
+        (
+            Self {
+                proxy: self.proxy.clone(),
+                begin: self.begin,
+                end: self.begin + offset,
+            },
+            Self {
+                proxy: self.proxy.clone(),
+                begin: self.begin + offset,
+                end: self.end,
+            },
+        )
     }
 }
 
 impl Writeable for WriteProxy {
     fn rw(&mut self) -> &mut [u8] {
-        let inner = self.inner.entry.inner.lock().unwrap();
-        &mut inner.block.get_data()[self.inner.begin..self.inner.end]
+        let inner = self.proxy.entry.inner.lock().unwrap();
+        &mut inner.block.get_data()[self.begin..self.end]
     }
 }
 
@@ -511,13 +554,19 @@ impl MetadataCache {
         loop {
             match inner.read_lock(loc, kind)? {
                 Locked(entry) => {
-                    return Ok(ReadProxy {
+                    let proxy_ = ReadProxy_ {
                         loc,
                         cache: self.clone(),
+                        entry: entry.clone(),
+                    };
+
+                    let proxy = ReadProxy {
+                        proxy: Arc::new(proxy_),
                         begin: 0,
                         end: BLOCK_SIZE,
-                        entry,
-                    })
+                    };
+
+                    return Ok(proxy);
                 }
                 Busy(entry) => self.wait_on_entry_(&*entry),
             }
@@ -532,15 +581,19 @@ impl MetadataCache {
         loop {
             match inner.write_lock(loc, kind)? {
                 Locked(entry) => {
-                    return Ok(WriteProxy {
-                        inner: ReadProxy {
-                            loc,
-                            cache: self.clone(),
-                            begin: 0,
-                            end: BLOCK_SIZE,
-                            entry,
-                        },
-                    })
+                    let proxy_ = WriteProxy_ {
+                        loc,
+                        cache: self.clone(),
+                        entry: entry.clone(),
+                    };
+
+                    let proxy = WriteProxy {
+                        proxy: Arc::new(proxy_),
+                        begin: 0,
+                        end: BLOCK_SIZE,
+                    };
+
+                    return Ok(proxy);
                 }
                 Busy(entry) => self.wait_on_entry_(&*entry),
             }
@@ -556,15 +609,19 @@ impl MetadataCache {
         loop {
             match inner.zero_lock(loc, kind)? {
                 Locked(entry) => {
-                    return Ok(WriteProxy {
-                        inner: ReadProxy {
-                            loc,
-                            cache: self.clone(),
-                            begin: 0,
-                            end: BLOCK_SIZE,
-                            entry,
-                        },
-                    })
+                    let proxy_ = WriteProxy_ {
+                        loc,
+                        cache: self.clone(),
+                        entry: entry.clone(),
+                    };
+
+                    let proxy = WriteProxy {
+                        proxy: Arc::new(proxy_),
+                        begin: 0,
+                        end: BLOCK_SIZE,
+                    };
+
+                    return Ok(proxy);
                 }
                 Busy(entry) => self.wait_on_entry_(&*entry),
             }
