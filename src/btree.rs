@@ -591,10 +591,8 @@ impl BTree {
 mod test {
     use super::*;
     use crate::block_allocator::*;
-    use crate::block_cache::*;
     use crate::core::*;
     use anyhow::{ensure, Result};
-    use std::io;
     use std::sync::{Arc, Mutex};
     use thinp::io_engine::*;
 
