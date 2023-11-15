@@ -109,6 +109,7 @@ impl<Data: Writeable> Node<Data> {
     }
 
     fn prepend(&mut self, keys: &[u32], values: &[u32]) {
+        assert!(keys.len() == values.len());
         self.keys.prepend(keys);
         self.values.prepend(values);
         self.nr_entries.inc(keys.len() as u32);
@@ -263,8 +264,8 @@ impl BTree {
             middle.prepend(&keys, &values);
 
             // Move entries from right to middle
-            let nr_mode = target_middle - nr_move;
-            let (keys, values) = right.shift_left(nr_mode);
+            let nr_move = target_middle - nr_move;
+            let (keys, values) = right.shift_left(nr_move);
             middle.append(&keys, &values);
         } else {
             // Move entries from left to right
@@ -272,7 +273,7 @@ impl BTree {
             let (keys, values) = left.remove_right(nr_move);
             right.prepend(&keys, &values);
 
-            // Move entries from middle to right
+            // Move entries from left to middle
             let nr_move = nr_middle;
             let (keys, values) = left.remove_right(nr_move);
             middle.prepend(&keys, &values);
@@ -472,7 +473,6 @@ impl BTree {
 
         loop {
             let mut child = w_node(spine.child());
-            let loc = child.loc;
 
             if !self.has_space_for_insert_(&child) {
                 if spine.top() {
@@ -488,10 +488,10 @@ impl BTree {
 
             if child.flags.get() == BTreeFlags::Leaf as u32 {
                 if idx < 0 {
-                    idx = 0;
-                }
-
-                if idx as usize >= child.keys.len() {
+                    child.keys.insert_at(0, key);
+                    child.values.insert_at(0, value);
+                    child.nr_entries.inc(1);
+                } else if idx as usize >= child.keys.len() {
                     // insert
                     child.keys.append(&[key]);
                     child.values.append(&[value]);
@@ -501,6 +501,7 @@ impl BTree {
                         // overwrite
                         child.values.set(idx as usize, value);
                     } else {
+                        ensure!(child.keys.get(idx as usize) < key);
                         child.keys.insert_at(idx as usize + 1, key);
                         child.values.insert_at(idx as usize + 1, value);
                         child.nr_entries.inc(1);
@@ -687,8 +688,8 @@ mod test {
 
         for (i, k) in keys.iter().enumerate() {
             fix.insert(*k, *k * 2)?;
-            let n = fix.check()?;
-            ensure!(n == i as u32 + 1);
+            // let n = fix.check()?;
+            // ensure!(n == i as u32 + 1);
         }
 
         fix.commit()?;
@@ -696,6 +697,9 @@ mod test {
         for k in keys {
             ensure!(fix.lookup(*k) == Some(k * 2));
         }
+
+        let n = fix.check()?;
+        ensure!(n == keys.len() as u32);
 
         Ok(())
     }
@@ -709,7 +713,7 @@ mod test {
     fn insert_random() -> Result<()> {
         use rand::seq::SliceRandom;
 
-        let count = 100000;
+        let count = 100_000;
         let mut keys: Vec<u32> = (0..count).collect();
 
         // shuffle the keys

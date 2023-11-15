@@ -90,21 +90,18 @@ impl<Data: Readable> U32Array<Data> {
 
         let mut lo = -1;
         let mut hi = self.nr_entries as isize;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
+        while (hi - lo) > 1 {
+            let mid = lo + ((hi - lo) / 2);
+            let mid_key = self.get(mid as usize);
 
-            if mid == lo {
+            if mid_key == key {
                 return mid;
             }
 
-            let mid_key = self.get(mid as usize);
-
-            if key < mid_key {
-                hi = mid;
-            } else if key > mid_key {
+            if mid_key < key {
                 lo = mid;
             } else {
-                return mid;
+                hi = mid;
             }
         }
 
@@ -171,7 +168,6 @@ impl<Data: Writeable> U32Array<Data> {
         for (i, v) in values.iter().enumerate() {
             self.set(i, *v);
         }
-        self.nr_entries += values.len();
     }
 
     pub fn append(&mut self, values: &[u32]) {
