@@ -509,12 +509,268 @@ mod insert_utils {
 
 //-------------------------------------------------------------------------
 
-// Sometimes we need to remember the index that led to a particular
-// node.
-struct Child {
-    index: usize,
-    node: WNode,
+mod remove_utilities {
+    use super::*;
+
+    // Sometimes we need to remember the index that led to a particular
+    // node.
+    struct Child {
+        index: usize,
+        node: WNode,
+    }
+
+    fn shift_(left: &mut WNode, right: &mut WNode, count: isize) {
+        if count > 0 {
+            let (keys, values) = left.remove_right(count as usize);
+            right.prepend(&keys, &values);
+        } else {
+            let (keys, values) = right.shift_left((-count) as usize);
+            left.append(&keys, &values);
+        }
+    }
+
+    fn rebalance2_(parent: &mut WNode, l: &mut Child, r: &mut Child) {
+        let left = &mut l.node;
+        let right = &mut r.node;
+
+        let nr_left = left.nr_entries.get();
+        let nr_right = right.nr_entries.get();
+
+        // Ensure the number of entries in each child will be greater
+        // than or equal to (max_entries / 3 + 1), so no matter which
+        // child is used for removal, the number will still be not
+        // less that (max_entries / 3).
+        let threshold = 2 * ((MAX_ENTRIES / 3) + 1);
+
+        if ((nr_left + nr_right) as usize) < threshold {
+            // merge
+            shift_(left, right, -(nr_right as isize));
+            parent.remove_at(r.index);
+        } else {
+            // rebalance
+            let target_left = (nr_left + nr_right) / 2;
+            shift_(left, right, nr_left as isize - target_left as isize);
+            parent.keys.set(r.index, right.first_key().unwrap());
+        }
+    }
+
+    fn rebalance2(spine: &mut Spine, left_idx: usize) -> Result<()> {
+        let mut parent = w_node(spine.child());
+
+        let left_loc = parent.values.get(left_idx);
+        let mut left = Child {
+            index: left_idx,
+            node: w_node(spine.shadow(left_loc)?),
+        };
+
+        let right_loc = parent.values.get(left_idx + 1);
+        let mut right = Child {
+            index: left_idx + 1,
+            node: w_node(spine.shadow(right_loc)?),
+        };
+
+        rebalance2_(&mut parent, &mut left, &mut right);
+        Ok(())
+    }
+
+    // We dump as many entries from center as possible into left, the the rest
+    // in right, then rebalance.  This wastes some cpu, but I want something
+    // simple atm.
+    fn delete_center_node(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
+        let left = &mut l.node;
+        let center = &mut c.node;
+        let right = &mut r.node;
+
+        let nr_left = left.nr_entries.get();
+        let nr_center = center.nr_entries.get();
+        // let nr_right = right.nr_entries.get();
+
+        let shift = std::cmp::min::<usize>(MAX_ENTRIES - nr_left as usize, nr_center as usize);
+        shift_(left, center, -(shift as isize));
+
+        if shift != nr_center as usize {
+            let shift = nr_center as usize - shift;
+            shift_(center, right, shift as isize);
+        }
+
+        parent.keys.set(r.index, right.first_key().unwrap());
+        parent.remove_at(c.index);
+        r.index -= 1;
+
+        rebalance2_(parent, l, r);
+    }
+
+    fn redistribute3(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
+        let left = &mut l.node;
+        let center = &mut c.node;
+        let right = &mut r.node;
+
+        let mut nr_left = left.nr_entries.get() as isize;
+        let nr_center = center.nr_entries.get() as isize;
+        let mut nr_right = right.nr_entries.get() as isize;
+
+        let total = nr_left + nr_center + nr_right;
+        let target_right = total / 3;
+        let remainder = if target_right * 3 != total { 1 } else { 0 };
+        let target_left = target_right + remainder;
+
+        if nr_left < nr_right {
+            let mut shift: isize = nr_left - target_left;
+
+            if shift < 0 && nr_center < -shift {
+                // not enough in central node
+                shift_(left, center, -nr_center);
+                shift += nr_center;
+                shift_(left, right, shift);
+
+                nr_right += shift;
+            } else {
+                shift_(left, center, shift);
+            }
+
+            shift_(center, right, target_right - nr_right);
+        } else {
+            let mut shift: isize = target_right - nr_right;
+
+            if shift > 0 && nr_center < shift {
+                // not enough in central node
+                shift_(center, right, nr_center);
+                shift -= nr_center;
+                shift_(left, right, shift);
+                nr_left -= shift;
+            } else {
+                shift_(center, right, shift);
+            }
+
+            shift_(left, center, nr_left - target_left);
+        }
+
+        parent.keys.set(c.index, center.first_key().unwrap());
+        parent.keys.set(r.index, right.first_key().unwrap());
+    }
+
+    fn rebalance3_(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
+        let nr_left = l.node.nr_entries.get();
+        let nr_center = c.node.nr_entries.get();
+        let nr_right = r.node.nr_entries.get();
+
+        let threshold = ((MAX_ENTRIES / 3) * 4 + 1) as u32;
+
+        if nr_left + nr_center + nr_right < threshold {
+            delete_center_node(parent, l, c, r);
+        } else {
+            redistribute3(parent, l, c, r);
+        }
+    }
+
+    fn rebalance3(spine: &mut Spine, left_idx: usize) -> Result<()> {
+        let mut parent = w_node(spine.child());
+
+        let left_loc = parent.values.get(left_idx);
+        let mut left = Child {
+            index: left_idx,
+            node: w_node(spine.shadow(left_loc)?),
+        };
+
+        let center_loc = parent.values.get(left_idx + 1);
+        let mut center = Child {
+            index: left_idx + 1,
+            node: w_node(spine.shadow(center_loc)?),
+        };
+
+        let right_loc = parent.values.get(left_idx + 2);
+        let mut right = Child {
+            index: left_idx + 2,
+            node: w_node(spine.shadow(right_loc)?),
+        };
+
+        rebalance3_(&mut parent, &mut left, &mut center, &mut right);
+        Ok(())
+    }
+
+    fn rebalance_children(spine: &mut Spine, key: u32) -> Result<()> {
+        let child = w_node(spine.child());
+
+        // FIXME: this implies a previous op left it in this state
+        // If there's only 1 entry in the child then it's doing nothing useful, so
+        // we can link the parent directly to the single grandchild.
+        if child.nr_entries.get() == 1 {
+            // FIXME: it would be more efficient to get the parent to
+            // point directly to the grandchild
+            let gc_loc = child.values.get(0);
+
+            // Copy the grandchild over the child
+            let mut child = spine.child();
+            let gc = spine.peek(gc_loc)?;
+            child.rw().copy_from_slice(gc.r());
+        } else {
+            let idx = child.keys.bsearch(key);
+            if idx < 0 {
+                // key isn't in the tree
+                todo!();
+            }
+
+            let has_left_sibling = idx > 0;
+            let has_right_sibling = idx < (child.nr_entries.get() - 1) as isize;
+
+            if !has_left_sibling {
+                rebalance2(spine, idx as usize)?;
+            } else if !has_right_sibling {
+                rebalance2(spine, (idx - 1) as usize)?;
+            } else {
+                rebalance3(spine, (idx - 1) as usize)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    // Returns the old value, if present
+    fn do_leaf(child: &mut WNode, key: u32) -> Result<Option<u32>> {
+        let idx = child.keys.bsearch(key);
+        if idx < 0 || idx as u32 >= child.nr_entries.get() || child.keys.get(idx as usize) != key {
+            return Ok(None);
+        }
+
+        let val = child.values.get(idx as usize);
+        child.remove_at(idx as usize);
+        Ok(Some(val))
+    }
+
+    pub fn remove(spine: &mut Spine, key: u32) -> Result<Option<u32>> {
+        let mut idx = 0isize;
+
+        loop {
+            let mut child = w_node(spine.child());
+
+            if !spine.top() {
+                // patch up the parent node
+                let mut parent = w_node(spine.parent());
+                parent.values.set(idx as usize, child.loc);
+            }
+
+            if child.is_leaf() {
+                return do_leaf(&mut child, key);
+            }
+
+            drop(child);
+            rebalance_children(spine, key)?;
+
+            let mut child = w_node(spine.child());
+            if child.flags.get() == BTreeFlags::Leaf as u32 {
+                return do_leaf(&mut child, key);
+            }
+
+            idx = child.keys.bsearch(key);
+
+            // We know the key is present or else rebalance_children would have failed.
+            // FIXME: check this
+            spine.push(child.values.get(idx as usize))?;
+        }
+    }
 }
+
+//-------------------------------------------------------------------------
 
 pub struct BTree {
     tm: Arc<TransactionManager>,
@@ -552,15 +808,17 @@ impl BTree {
             }
 
             if node.is_leaf() {
-                return Some(node.values.get(idx as usize));
+                return if node.keys.get(idx as usize) == key {
+                    Some(node.values.get(idx as usize))
+                } else {
+                    None
+                };
             }
 
             let child = node.values.get(idx as usize);
             block = self.tm.read(child, &BNODE_KIND).unwrap();
         }
     }
-
-    //----------------
 
     pub fn insert(&mut self, key: u32, value: u32) -> Result<()> {
         let mut spine = Spine::new(self.tm.clone(), self.root)?;
@@ -569,250 +827,11 @@ impl BTree {
         Ok(())
     }
 
-    //-------------------------------
-
-    fn shift_(left: &mut WNode, right: &mut WNode, count: isize) {
-        if count > 0 {
-            let (keys, values) = left.remove_right(count as usize);
-            right.prepend(&keys, &values);
-        } else {
-            let (keys, values) = right.shift_left((-count) as usize);
-            left.append(&keys, &values);
-        }
-    }
-
-    fn r_rebalance2_(parent: &mut WNode, l: &mut Child, r: &mut Child) {
-        let left = &mut l.node;
-        let right = &mut r.node;
-
-        let nr_left = left.nr_entries.get();
-        let nr_right = right.nr_entries.get();
-
-        // Ensure the number of entries in each child will be greater
-        // than or equal to (max_entries / 3 + 1), so no matter which
-        // child is used for removal, the number will still be not
-        // less that (max_entries / 3).
-        let threshold = 2 * ((MAX_ENTRIES / 3) + 1);
-
-        if ((nr_left + nr_right) as usize) < threshold {
-            // merge
-            BTree::shift_(left, right, -(nr_right as isize));
-            parent.remove_at(r.index);
-        } else {
-            // rebalance
-            let target_left = (nr_left + nr_right) / 2;
-            BTree::shift_(left, right, nr_left as isize - target_left as isize);
-            parent.keys.set(r.index, right.first_key().unwrap());
-        }
-    }
-
-    fn r_rebalance2(spine: &mut Spine, left_idx: usize) -> Result<()> {
-        let mut parent = w_node(spine.child());
-
-        let left_loc = parent.values.get(left_idx);
-        let mut left = Child {
-            index: left_idx,
-            node: w_node(spine.shadow(left_loc)?),
-        };
-
-        let right_loc = parent.values.get(left_idx + 1);
-        let mut right = Child {
-            index: left_idx + 1,
-            node: w_node(spine.shadow(right_loc)?),
-        };
-
-        BTree::r_rebalance2_(&mut parent, &mut left, &mut right);
-        Ok(())
-    }
-
-    // We dump as many entries from center as possible into left, the the rest
-    // in right, then rebalance.  This wastes some cpu, but I want something
-    // simple atm.
-    fn delete_center_node(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
-        let left = &mut l.node;
-        let center = &mut c.node;
-        let right = &mut r.node;
-
-        let nr_left = left.nr_entries.get();
-        let nr_center = center.nr_entries.get();
-        let nr_right = right.nr_entries.get();
-
-        let shift = std::cmp::min::<usize>(MAX_ENTRIES - nr_left as usize, nr_center as usize);
-        BTree::shift_(left, center, -(shift as isize));
-
-        if shift != nr_center as usize {
-            let shift = nr_center as usize - shift;
-
-            BTree::shift_(center, right, shift as isize);
-        }
-
-        parent.keys.set(r.index, right.first_key().unwrap());
-        parent.remove_at(c.index);
-        r.index -= 1;
-
-        BTree::r_rebalance2_(parent, l, r);
-    }
-
-    fn r_redistribute3_(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
-        let left = &mut l.node;
-        let center = &mut c.node;
-        let right = &mut r.node;
-
-        let mut nr_left = left.nr_entries.get() as isize;
-        let nr_center = center.nr_entries.get() as isize;
-        let mut nr_right = right.nr_entries.get() as isize;
-
-        let total = nr_left + nr_center + nr_right;
-        let target_right = total / 3;
-        let remainder = if target_right * 3 != total { 1 } else { 0 };
-        let target_left = target_right + remainder;
-
-        if nr_left < nr_right {
-            let mut shift = nr_left - target_left;
-
-            if shift < 0 && nr_center < -shift {
-                // not enough in central node
-                BTree::shift_(left, center, -nr_center);
-                shift += nr_center;
-                BTree::shift_(left, right, shift);
-
-                nr_right += shift;
-            } else {
-                BTree::shift_(left, center, shift);
-            }
-
-            BTree::shift_(center, right, target_right - nr_right);
-        } else {
-            let mut shift = target_right - nr_right;
-
-            if shift > 0 && nr_center < shift {
-                // not enough in central node
-                BTree::shift_(center, right, nr_center);
-                shift -= nr_center;
-                BTree::shift_(left, right, shift);
-                nr_left -= shift;
-            } else {
-                BTree::shift_(center, right, shift);
-            }
-
-            BTree::shift_(left, center, nr_left - target_left);
-        }
-
-        parent.keys.set(c.index, center.first_key().unwrap());
-        parent.keys.set(r.index, right.first_key().unwrap());
-    }
-
-    fn r_rebalance3_(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
-        let nr_left = l.node.nr_entries.get();
-        let nr_center = c.node.nr_entries.get();
-        let nr_right = r.node.nr_entries.get();
-
-        let threshold = ((MAX_ENTRIES / 3) * 4 + 1) as u32;
-
-        if nr_left + nr_center + nr_right < threshold {
-            BTree::delete_center_node(parent, l, c, r);
-        } else {
-            BTree::r_redistribute3_(parent, l, c, r);
-        }
-    }
-
-    fn r_rebalance3(spine: &mut Spine, left_idx: usize) -> Result<()> {
-        let mut parent = w_node(spine.child());
-
-        let left_loc = parent.values.get(left_idx);
-        let mut left = Child {
-            index: left_idx,
-            node: w_node(spine.shadow(left_loc)?),
-        };
-
-        let center_loc = parent.values.get(left_idx + 1);
-        let mut center = Child {
-            index: left_idx + 1,
-            node: w_node(spine.shadow(center_loc)?),
-        };
-
-        let right_loc = parent.values.get(left_idx + 2);
-        let mut right = Child {
-            index: left_idx + 2,
-            node: w_node(spine.shadow(right_loc)?),
-        };
-
-        BTree::r_rebalance3_(&mut parent, &mut left, &mut center, &mut right);
-        Ok(())
-    }
-
-    fn rebalance_children_(&mut self, spine: &mut Spine, key: u32) -> Result<()> {
-        let child = w_node(spine.child());
-
-        // FIXME: this implies a previous op left it in this state
-        // If there's only 1 entry in the child then it's doing nothing useful, so
-        // we can link the parent directly to the single grandchild.
-        if child.nr_entries.get() == 1 {
-            todo!();
-        }
-
-        let idx = child.keys.bsearch(key);
-        if idx < 0 {
-            // key isn't in the tree
-            todo!();
-        }
-
-        let has_left_sibling = idx > 0;
-        let has_right_sibling = idx < (child.nr_entries.get() - 1) as isize;
-
-        if !has_left_sibling {
-            BTree::r_rebalance2(spine, idx as usize)?;
-        } else if !has_right_sibling {
-            BTree::r_rebalance2(spine, (idx - 1) as usize)?;
-        } else {
-            BTree::r_rebalance3(spine, (idx - 1) as usize)?;
-        }
-
-        Ok(())
-    }
-
-    // Returns the old value, if present
-    fn do_leaf_(&mut self, child: &mut WNode, key: u32, idx: isize) -> Result<Option<u32>> {
-        let idx = child.keys.bsearch(key);
-        if idx < 0 || idx as u32 >= child.nr_entries.get() || child.keys.get(idx as usize) != key {
-            return Ok(None);
-        }
-
-        let val = child.values.get(idx as usize);
-        child.remove_at(idx as usize);
-        Ok(Some(val))
-    }
-
     pub fn remove(&mut self, key: u32) -> Result<Option<u32>> {
         let mut spine = Spine::new(self.tm.clone(), self.root)?;
-        let mut idx = 0isize;
-
-        loop {
-            let mut child = w_node(spine.child());
-
-            if !spine.top() {
-                // patch up the parent node
-                let mut parent = w_node(spine.parent());
-                parent.values.set(idx as usize, child.loc);
-            }
-
-            if child.is_leaf() {
-                return self.do_leaf_(&mut child, key, idx);
-            }
-
-            drop(child);
-            self.rebalance_children_(&mut spine, key);
-
-            let mut child = w_node(spine.child());
-            if child.flags.get() == BTreeFlags::Leaf as u32 {
-                return self.do_leaf_(&mut child, key, idx);
-            }
-
-            let idx = child.keys.bsearch(key);
-
-            // We know the key is present or else rebalance_child would have failed.
-            spine.push(child.values.get(idx as usize))?;
-        }
+        let r = remove_utilities::remove(&mut spine, key)?;
+        self.root = spine.get_root();
+        Ok(r)
     }
 
     //-------------------------------
@@ -882,6 +901,7 @@ mod test {
     use crate::block_allocator::*;
     use crate::core::*;
     use anyhow::{ensure, Result};
+    use rand::seq::SliceRandom;
     use std::sync::{Arc, Mutex};
     use thinp::io_engine::*;
 
@@ -931,6 +951,10 @@ mod test {
 
         fn insert(&mut self, key: u32, value: u32) -> Result<()> {
             self.tree.insert(key, value)
+        }
+
+        fn remove(&mut self, key: u32) -> Result<Option<u32>> {
+            self.tree.remove(key)
         }
 
         fn commit(&mut self) -> Result<()> {
@@ -999,8 +1023,6 @@ mod test {
 
     #[test]
     fn insert_random() -> Result<()> {
-        use rand::seq::SliceRandom;
-
         let count = 100_000;
         let mut keys: Vec<u32> = (0..count).collect();
 
@@ -1009,6 +1031,55 @@ mod test {
         keys.shuffle(&mut rng);
 
         insert_test(&keys)
+    }
+
+    #[test]
+    fn remove_single() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+
+        let key = 100;
+        let val = 123;
+        fix.insert(key, val)?;
+        ensure!(fix.lookup(key) == Some(val));
+        fix.remove(key)?;
+        ensure!(fix.lookup(key) == None);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_random() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+
+        // build a big btree
+        let count = 100_000;
+        for i in 0..count {
+            fix.insert(i, i * 3)?;
+        }
+        eprintln!("built tree");
+
+        let mut keys: Vec<u32> = (0..count).collect();
+        let mut rng = rand::thread_rng();
+        keys.shuffle(&mut rng);
+
+        for (i, k) in keys.into_iter().enumerate() {
+            ensure!(fix.lookup(k).is_some());
+            let mval = fix.remove(k)?;
+            ensure!(mval.is_some());
+            ensure!(mval.unwrap() == k * 3);
+            ensure!(fix.lookup(k).is_none());
+            if i % 1000 == 0 {
+                eprintln!("removed {}", i);
+            }
+
+            /*
+            let n = fix.check()?;
+            ensure!(n == count - i as u32 - 1);
+            */
+        }
+
+        Ok(())
     }
 }
 
