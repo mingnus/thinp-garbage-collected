@@ -1,7 +1,7 @@
 use anyhow::{ensure, Result};
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{LittleEndian, WriteBytesExt};
 use std::collections::BTreeSet;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::Arc;
 
 use crate::block_cache::*;
@@ -26,28 +26,11 @@ struct NodeHeader {
     nr_entries: u32,
 }
 
-fn read_node_header<R: Read>(r: &mut R) -> NodeHeader {
-    let flags = r.read_u32::<LittleEndian>().unwrap();
-    let nr_entries = r.read_u32::<LittleEndian>().unwrap();
-
-    NodeHeader { flags, nr_entries }
-}
-
 fn write_node_header<W: Write>(w: &mut W, hdr: NodeHeader) -> Result<()> {
     w.write_u32::<LittleEndian>(hdr.flags)?;
     w.write_u32::<LittleEndian>(hdr.nr_entries)?;
     Ok(())
 }
-
-/*
-fn key_base(data: &mut [u8]) -> &mut [u8] {
-    &mut data[KEYS_OFFSET..VALUES_OFFSET]
-}
-
-fn value_base(data: &mut [u8]) -> &mut [u8] {
-    &mut data[VALUES_OFFSET..]
-}
-*/
 
 //-------------------------------------------------------------------------
 
@@ -998,7 +981,7 @@ mod test {
 
         fix.commit()?;
 
-        for (i, k) in keys.iter().enumerate() {
+        for (_i, k) in keys.iter().enumerate() {
             fix.insert(*k, *k * 2)?;
             // let n = fix.check()?;
             // ensure!(n == i as u32 + 1);
