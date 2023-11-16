@@ -85,6 +85,14 @@ impl<Data: Readable> Node<Data> {
     fn is_leaf(&self) -> bool {
         self.flags.get() == BTreeFlags::Leaf as u32
     }
+
+    fn first_key(&self) -> Option<u32> {
+        if self.keys.len() == 0 {
+            None
+        } else {
+            Some(self.keys.get(0))
+        }
+    }
 }
 
 impl<Data: Writeable> Node<Data> {
@@ -170,6 +178,13 @@ fn init_node(mut block: WriteProxy, is_leaf: bool) -> Result<WNode> {
     Ok(w_node(block))
 }
 
+// Sometimes we need to remember the index that led to a particular
+// node.
+struct Child {
+    index: usize,
+    node: WNode,
+}
+
 pub struct BTree {
     tm: Arc<TransactionManager>,
     root: u32,
@@ -205,7 +220,7 @@ impl BTree {
                 return None;
             }
 
-            if node.flags.get() == BTreeFlags::Leaf as u32 {
+            if node.is_leaf() {
                 return Some(node.values.get(idx as usize));
             }
 
@@ -326,10 +341,11 @@ impl BTree {
         self.redistribute2_(&mut left, &mut right);
 
         // Adjust the parent keys
-        parent.keys.set(parent_idx, right.keys.get(0));
+        let first_key = right.first_key().unwrap();
+        parent.keys.set(parent_idx, first_key);
 
         // Choose the correct child in the spine
-        if key < right.keys.get(0) {
+        if key < first_key {
             spine.replace_child(left_block);
         }
 
@@ -345,10 +361,11 @@ impl BTree {
         self.redistribute2_(&mut left, &mut right);
 
         // Adjust the parent keys
-        parent.keys.set(parent_idx + 1, right.keys.get(0));
+        let first_key = right.first_key().unwrap();
+        parent.keys.set(parent_idx + 1, first_key);
 
         // Choose the correct child in the spine
-        if key >= right.keys.get(0) {
+        if key >= first_key {
             spine.replace_child(right_block);
         }
 
@@ -374,12 +391,13 @@ impl BTree {
         // Adjust the parent keys
         let mut parent = w_node(spine.parent());
 
-        parent.keys.insert_at(idx + 1, right.keys.get(0));
+        let first_key = right.first_key().unwrap();
+        parent.keys.insert_at(idx + 1, first_key);
         parent.values.insert_at(idx + 1, right.loc);
         parent.nr_entries.inc(1);
 
         // Choose the correct child in the spine
-        if key >= right.keys.get(0) {
+        if key >= first_key {
             spine.replace_child(right_block);
         }
 
@@ -401,12 +419,15 @@ impl BTree {
             self.redistribute3_(&mut left, &mut middle, &mut right);
 
             // patch up the parent
-            parent.keys.set(1, right.keys.get(0));
-            parent.insert_at(1, middle.keys.get(0), middle.loc);
+            let r_first_key = right.first_key().unwrap();
+            parent.keys.set(1, r_first_key);
 
-            if key >= right.keys.get(0) {
+            let m_first_key = middle.first_key().unwrap();
+            parent.insert_at(1, m_first_key, middle.loc);
+
+            if key >= r_first_key {
                 spine.replace_child(right_block);
-            } else if key >= middle.keys.get(0) {
+            } else if key >= m_first_key {
                 spine.replace_child(middle_block);
             }
         } else {
@@ -420,12 +441,15 @@ impl BTree {
             self.redistribute3_(&mut left, &mut middle, &mut right);
 
             // patch up the parent
-            parent.keys.set(idx, right.keys.get(0));
-            parent.insert_at(idx, middle.keys.get(0), middle.loc);
+            let r_first_key = right.first_key().unwrap();
+            parent.keys.set(idx, r_first_key);
 
-            if key < middle.keys.get(0) {
+            let m_first_key = middle.first_key().unwrap();
+            parent.insert_at(idx, m_first_key, middle.loc);
+
+            if key < m_first_key {
                 spine.replace_child(left_block);
-            } else if key < right.keys.get(0) {
+            } else if key < r_first_key {
                 spine.replace_child(middle_block);
             }
         }
@@ -486,7 +510,7 @@ impl BTree {
 
             idx = child.keys.bsearch(key);
 
-            if child.flags.get() == BTreeFlags::Leaf as u32 {
+            if child.is_leaf() {
                 if idx < 0 {
                     child.keys.insert_at(0, key);
                     child.values.insert_at(0, value);
@@ -528,6 +552,257 @@ impl BTree {
         self.root = spine.get_root();
         Ok(())
     }
+
+    //-------------------------------
+
+    fn shift_(left: &mut WNode, right: &mut WNode, count: isize) {
+        let nr_left = left.nr_entries.get();
+        let nr_right = right.nr_entries.get();
+
+        if count > 0 {
+            let (keys, values) = left.remove_right(count as usize);
+            right.prepend(&keys, &values);
+        } else {
+            let (keys, values) = right.shift_left((-count) as usize);
+            left.append(&keys, &values);
+        }
+    }
+
+    fn r_rebalance2_(parent: &mut WNode, l: &mut Child, r: &mut Child) {
+        let left = &mut l.node;
+        let right = &mut r.node;
+
+        let nr_left = left.nr_entries.get();
+        let nr_right = right.nr_entries.get();
+
+        // Ensure the number of entries in each child will be greater
+        // than or equal to (max_entries / 3 + 1), so no matter which
+        // child is used for removal, the number will still be not
+        // less that (max_entries / 3).
+        let threshold = 2 * ((MAX_ENTRIES / 3) + 1);
+
+        if ((nr_left + nr_right) as usize) < threshold {
+            // merge
+            BTree::shift_(left, right, -(nr_right as isize));
+            parent.remove_at(r.index);
+        } else {
+            // rebalance
+            let target_left = (nr_left + nr_right) / 2;
+            BTree::shift_(left, right, nr_left as isize - target_left as isize);
+            parent.keys.set(r.index, right.first_key().unwrap());
+        }
+    }
+
+    fn r_rebalance2(spine: &mut Spine, left_idx: usize) -> Result<()> {
+        let mut parent = w_node(spine.child());
+
+        let left_loc = parent.values.get(left_idx);
+        let mut left = Child {
+            index: left_idx,
+            node: w_node(spine.shadow(left_loc)?),
+        };
+
+        let right_loc = parent.values.get(left_idx + 1);
+        let mut right = Child {
+            index: left_idx + 1,
+            node: w_node(spine.shadow(right_loc)?),
+        };
+
+        BTree::r_rebalance2_(&mut parent, &mut left, &mut right);
+        Ok(())
+    }
+
+    // We dump as many entries from center as possible into left, the the rest
+    // in right, then rebalance.  This wastes some cpu, but I want something
+    // simple atm.
+    fn delete_center_node(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
+        let left = &mut l.node;
+        let center = &mut c.node;
+        let right = &mut r.node;
+
+        let nr_left = left.nr_entries.get();
+        let nr_center = center.nr_entries.get();
+        let nr_right = right.nr_entries.get();
+
+        let shift = std::cmp::min::<usize>(MAX_ENTRIES - nr_left as usize, nr_center as usize);
+        BTree::shift_(left, center, -(shift as isize));
+
+        if shift != nr_center as usize {
+            let shift = nr_center as usize - shift;
+
+            BTree::shift_(center, right, shift as isize);
+        }
+
+        parent.keys.set(r.index, right.first_key().unwrap());
+        parent.remove_at(c.index);
+        r.index -= 1;
+
+        BTree::r_rebalance2_(parent, l, r);
+    }
+
+    fn r_redistribute3_(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
+        let left = &mut l.node;
+        let center = &mut c.node;
+        let right = &mut r.node;
+
+        let mut nr_left = left.nr_entries.get() as isize;
+        let nr_center = center.nr_entries.get() as isize;
+        let mut nr_right = right.nr_entries.get() as isize;
+
+        let total = nr_left + nr_center + nr_right;
+        let target_right = total / 3;
+        let remainder = if target_right * 3 != total { 1 } else { 0 };
+        let target_left = target_right + remainder;
+
+        if nr_left < nr_right {
+            let mut shift = nr_left - target_left;
+
+            if shift < 0 && nr_center < -shift {
+                // not enough in central node
+                BTree::shift_(left, center, -nr_center);
+                shift += nr_center;
+                BTree::shift_(left, right, shift);
+
+                nr_right += shift;
+            } else {
+                BTree::shift_(left, center, shift);
+            }
+
+            BTree::shift_(center, right, target_right - nr_right);
+        } else {
+            let mut shift = target_right - nr_right;
+
+            if shift > 0 && nr_center < shift {
+                // not enough in central node
+                BTree::shift_(center, right, nr_center);
+                shift -= nr_center;
+                BTree::shift_(left, right, shift);
+                nr_left -= shift;
+            } else {
+                BTree::shift_(center, right, shift);
+            }
+
+            BTree::shift_(left, center, nr_left - target_left);
+        }
+
+        parent.keys.set(c.index, center.first_key().unwrap());
+        parent.keys.set(r.index, right.first_key().unwrap());
+    }
+
+    fn r_rebalance3_(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
+        let nr_left = l.node.nr_entries.get();
+        let nr_center = c.node.nr_entries.get();
+        let nr_right = r.node.nr_entries.get();
+
+        let threshold = ((MAX_ENTRIES / 3) * 4 + 1) as u32;
+
+        if nr_left + nr_center + nr_right < threshold {
+            BTree::delete_center_node(parent, l, c, r);
+        } else {
+            BTree::r_redistribute3_(parent, l, c, r);
+        }
+    }
+
+    fn r_rebalance3(spine: &mut Spine, left_idx: usize) -> Result<()> {
+        let mut parent = w_node(spine.child());
+
+        let left_loc = parent.values.get(left_idx);
+        let mut left = Child {
+            index: left_idx,
+            node: w_node(spine.shadow(left_loc)?),
+        };
+
+        let center_loc = parent.values.get(left_idx + 1);
+        let mut center = Child {
+            index: left_idx + 1,
+            node: w_node(spine.shadow(center_loc)?),
+        };
+
+        let right_loc = parent.values.get(left_idx + 2);
+        let mut right = Child {
+            index: left_idx + 2,
+            node: w_node(spine.shadow(right_loc)?),
+        };
+
+        BTree::r_rebalance3_(&mut parent, &mut left, &mut center, &mut right);
+        Ok(())
+    }
+
+    fn rebalance_children_(&mut self, spine: &mut Spine, key: u32) -> Result<()> {
+        let child = w_node(spine.child());
+
+        // FIXME: this implies a previous op left it in this state
+        // If there's only 1 entry in the child then it's doing nothing useful, so
+        // we can link the parent directly to the single grandchild.
+        if child.nr_entries.get() == 1 {
+            todo!();
+        }
+
+        let idx = child.keys.bsearch(key);
+        if idx < 0 {
+            // key isn't in the tree
+            todo!();
+        }
+
+        let has_left_sibling = idx > 0;
+        let has_right_sibling = idx < (child.nr_entries.get() - 1) as isize;
+
+        if !has_left_sibling {
+            BTree::r_rebalance2(spine, idx as usize)?;
+        } else if !has_right_sibling {
+            BTree::r_rebalance2(spine, (idx - 1) as usize)?;
+        } else {
+            BTree::r_rebalance3(spine, (idx - 1) as usize)?;
+        }
+
+        Ok(())
+    }
+
+    // Returns the old value, if present
+    fn do_leaf_(&mut self, child: &mut WNode, key: u32, idx: isize) -> Result<Option<u32>> {
+        let idx = child.keys.bsearch(key);
+        if idx < 0 || idx as u32 >= child.nr_entries.get() || child.keys.get(idx as usize) != key {
+            return Ok(None);
+        }
+
+        let val = child.values.get(idx as usize);
+        child.remove_at(idx as usize);
+        Ok(Some(val))
+    }
+
+    pub fn remove(&mut self, key: u32) -> Result<Option<u32>> {
+        let mut spine = Spine::new(self.tm.clone(), self.root)?;
+        let mut idx = 0isize;
+
+        loop {
+            let mut child = w_node(spine.child());
+
+            if !spine.top() {
+                // patch up the parent node
+                let mut parent = w_node(spine.parent());
+                parent.values.set(idx as usize, child.loc);
+            }
+
+            if child.is_leaf() {
+                return self.do_leaf_(&mut child, key, idx);
+            }
+
+            drop(child);
+            self.rebalance_children_(&mut spine, key);
+
+            let mut child = w_node(spine.child());
+            if child.flags.get() == BTreeFlags::Leaf as u32 {
+                return self.do_leaf_(&mut child, key, idx);
+            }
+
+            let idx = child.keys.bsearch(key);
+
+            // We know the key is present or else rebalance_child would have failed.
+            spine.push(child.values.get(idx as usize))?;
+        }
+    }
+
+    //-------------------------------
 
     fn check_(
         &self,
