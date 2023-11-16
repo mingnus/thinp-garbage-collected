@@ -8,7 +8,7 @@ use crate::transaction_manager::*;
 //-------------------------------------------------------------------------
 
 pub struct Spine {
-    tm: Arc<TransactionManager>,
+    pub tm: Arc<TransactionManager>,
     new_root: u32,
     parent: Option<WriteProxy>,
     child: WriteProxy,
