@@ -81,13 +81,6 @@ impl BlockAllocator {
         }
     }
 
-    /*
-    pub fn allocate_metadata_specific(&mut self, loc: u32) -> Result<()> {
-        self.allocated_metadata.set(loc as u64)?;
-        Ok(())
-    }
-    */
-
     pub fn allocate_data(&mut self, region: &Range<u64>) -> Result<Option<u64>> {
         self.allocated_data.set_first_clear_in_range(region)
     }

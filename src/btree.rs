@@ -1086,18 +1086,16 @@ mod test {
     fn rolling_insert_remove() -> Result<()> {
         // If the GC is not working then we'll run out of metadata space.
         let mut fix = Fixture::new(16, 10240)?;
-        eprintln!("about to commit");
         fix.commit()?;
-        eprintln!("done");
 
         for k in 0..1000_000 {
-            eprintln!("k = {}", k);
             fix.insert(k, k * 3)?;
             if k > 100 {
                 fix.remove(k - 100)?;
             }
 
-            if k % 1000 == 0 {
+            if k % 10000 == 0 {
+                eprintln!("inserted {} entries", k);
                 fix.commit()?;
             }
         }
