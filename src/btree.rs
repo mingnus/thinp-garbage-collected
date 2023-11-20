@@ -1,9 +1,10 @@
 use anyhow::{ensure, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::Write;
 use std::sync::Arc;
 
+use crate::block_allocator::BlockRef;
 use crate::block_cache::*;
 use crate::block_kinds::*;
 use crate::byte_types::*;
@@ -876,6 +877,18 @@ impl BTree {
     }
 }
 
+pub fn btree_refs(data: &ReadProxy, queue: &mut VecDeque<BlockRef>) {
+    let node = r_node(data.clone());
+
+    if node.is_leaf() {
+        // FIXME: values should be refs, except in the btree unit tests
+    } else {
+        for i in 0..node.nr_entries.get() {
+            queue.push_back(BlockRef::Metadata(node.values.get(i as usize)));
+        }
+    }
+}
+
 //-------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -892,10 +905,13 @@ mod test {
         Arc::new(CoreIoEngine::new(nr_blocks as u64))
     }
 
-    fn mk_allocator(cache: Arc<MetadataCache>, nr_data_blocks: u64) -> Arc<Mutex<BlockAllocator>> {
-        let mut allocator = BlockAllocator::new(cache, nr_data_blocks);
-        allocator.allocate_metadata_specific(0); // reserve the superblock
-        Arc::new(Mutex::new(allocator))
+    fn mk_allocator(
+        cache: Arc<MetadataCache>,
+        nr_data_blocks: u64,
+    ) -> Result<Arc<Mutex<BlockAllocator>>> {
+        let mut allocator = BlockAllocator::new(cache, nr_data_blocks)?;
+        allocator.reserve_metadata(0); // reserve the superblock
+        Ok(Arc::new(Mutex::new(allocator)))
     }
 
     #[allow(dead_code)]
@@ -911,7 +927,7 @@ mod test {
         fn new(nr_metadata_blocks: u32, nr_data_blocks: u64) -> Result<Self> {
             let engine = mk_engine(nr_metadata_blocks);
             let cache = Arc::new(MetadataCache::new(engine.clone(), 16)?);
-            let allocator = mk_allocator(cache.clone(), nr_data_blocks);
+            let allocator = mk_allocator(cache.clone(), nr_data_blocks)?;
             let tm = Arc::new(TransactionManager::new(allocator.clone(), cache.clone()));
             let tree = BTree::empty_tree(tm.clone())?;
 
@@ -941,7 +957,8 @@ mod test {
         }
 
         fn commit(&mut self) -> Result<()> {
-            self.tm.commit()
+            let roots = vec![self.tree.root()];
+            self.tm.commit(&roots)
         }
     }
 
@@ -1060,6 +1077,29 @@ mod test {
             let n = fix.check()?;
             ensure!(n == count - i as u32 - 1);
             */
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn rolling_insert_remove() -> Result<()> {
+        // If the GC is not working then we'll run out of metadata space.
+        let mut fix = Fixture::new(16, 10240)?;
+        eprintln!("about to commit");
+        fix.commit()?;
+        eprintln!("done");
+
+        for k in 0..1000_000 {
+            eprintln!("k = {}", k);
+            fix.insert(k, k * 3)?;
+            if k > 100 {
+                fix.remove(k - 100)?;
+            }
+
+            if k % 1000 == 0 {
+                fix.commit()?;
+            }
         }
 
         Ok(())

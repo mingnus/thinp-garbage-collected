@@ -8,11 +8,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::ThreadId;
 use thinp::io_engine::*;
 
+use crate::block_kinds::EPHEMERAL_KIND;
 use crate::byte_types::*;
 
 //-------------------------------------------------------------------------
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Kind(pub u32);
 
 // All blocks begin with this header.  The is automatically calculated by
@@ -271,7 +272,7 @@ impl MetadataCacheInner {
 
     fn verify_(&self, block: &Block, kind: &Kind) -> Result<()> {
         let mut r = std::io::Cursor::new(block.get_data());
-        let hdr = read_block_header(&mut r)?;
+        let mut hdr = read_block_header(&mut r)?;
 
         if hdr.loc != block.loc as u32 {
             return fail_(format!(
@@ -281,16 +282,26 @@ impl MetadataCacheInner {
         }
 
         if hdr.kind != *kind {
-            return fail_(format!(
-                "verify failed: hdr.kind {} != kind {}",
-                hdr.kind.0, kind.0
-            ));
+            if hdr.kind == EPHEMERAL_KIND {
+                // FIXME: this is bad, we mutate the data in a verify fn, which is
+                // unexpected.
+                hdr.kind = *kind;
+                let mut w = std::io::Cursor::new(block.get_data());
+                write_block_header(&mut w, &hdr)?;
+            } else {
+                return fail_(format!(
+                    "verify failed: hdr.kind {} != kind {}",
+                    hdr.kind.0, kind.0
+                ));
+            }
         }
 
         Ok(())
     }
 
     fn prep_(&self, block: &Block, kind: &Kind) -> Result<()> {
+        assert!(*kind != EPHEMERAL_KIND);
+
         let hdr = BlockHeader {
             sum: 0,
             loc: block.loc as u32,
@@ -309,7 +320,12 @@ impl MetadataCacheInner {
 
     fn read_(&mut self, loc: u32, kind: &Kind) -> Result<Block> {
         let block = self.engine.read(loc as u64)?;
-        self.verify_(&block, kind)?;
+
+        // The ephemeral kind is used by the GC, which doesn't yet
+        // know the actual kind.
+        if *kind != EPHEMERAL_KIND {
+            self.verify_(&block, kind)?;
+        }
         Ok(block)
     }
 
@@ -342,6 +358,26 @@ impl MetadataCacheInner {
             let entry = Arc::new(CacheEntry::new_read(self.read_(loc, kind)?, kind));
             self.cache.insert(loc, entry.clone());
             Ok(Locked(entry.clone()))
+        }
+    }
+
+    pub fn gc_lock(&mut self, loc: u32) -> Result<LockResult> {
+        use LockResult::*;
+
+        if let Some(entry) = self.cache.get_mut(&loc).cloned() {
+            if entry.read_lock() {
+                self.remove_lru_(loc);
+                Ok(Locked(entry.clone()))
+            } else {
+                panic!("cannot gc_lock a write locked block");
+            }
+        } else {
+            let entry = Arc::new(CacheEntry::new_read(
+                self.read_(loc, &EPHEMERAL_KIND)?,
+                &EPHEMERAL_KIND,
+            ));
+            self.cache.insert(loc, entry.clone());
+            Ok(Locked(entry))
         }
     }
 
@@ -569,6 +605,35 @@ impl MetadataCache {
                     return Ok(proxy);
                 }
                 Busy(entry) => self.wait_on_entry_(&*entry),
+            }
+        }
+    }
+
+    pub fn gc_lock(self: Arc<Self>, loc: u32) -> Result<ReadProxy> {
+        use LockResult::*;
+
+        let mut inner = self.inner.lock().unwrap();
+
+        loop {
+            match inner.gc_lock(loc)? {
+                Locked(entry) => {
+                    let proxy_ = ReadProxy_ {
+                        loc,
+                        cache: self.clone(),
+                        entry: entry.clone(),
+                    };
+
+                    let proxy = ReadProxy {
+                        proxy: Arc::new(proxy_),
+                        begin: 0,
+                        end: BLOCK_SIZE,
+                    };
+
+                    return Ok(proxy);
+                }
+                Busy(_) => {
+                    panic!("gc_lock blocked!");
+                }
             }
         }
     }

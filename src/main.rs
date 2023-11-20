@@ -11,7 +11,7 @@ use thinp_garbage_collected::transaction_manager::*;
 fn main() -> Result<()> {
     let engine: Arc<dyn IoEngine> = Arc::new(CoreIoEngine::new(1024));
     let cache = Arc::new(MetadataCache::new(engine, 16)?);
-    let allocator = Arc::new(Mutex::new(BlockAllocator::new(cache.clone(), 100)));
+    let allocator = Arc::new(Mutex::new(BlockAllocator::new(cache.clone(), 100)?));
     let tm = Arc::new(TransactionManager::new(allocator, cache));
     let tree = BTree::empty_tree(tm)?;
 

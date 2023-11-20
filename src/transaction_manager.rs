@@ -34,9 +34,14 @@ impl TransactionManager_ {
         }
     }
 
-    fn commit(&mut self) -> Result<()> {
-        // quiesce the gc
-        self.allocator.lock().unwrap().gc_quiesce();
+    fn commit(&mut self, roots: &[u32]) -> Result<()> {
+        {
+            let mut allocator = self.allocator.lock().unwrap();
+
+            // quiesce the gc
+            allocator.gc_quiesce();
+            allocator.set_roots(roots);
+        }
 
         // FIXME: check that only the superblock is held
         self.cache.flush()?;
@@ -72,7 +77,7 @@ impl TransactionManager_ {
     }
 
     fn new_block(&mut self, kind: &Kind) -> Result<WriteProxy> {
-        if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
+        if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata()? {
             let b = self.cache.zero_lock(loc, kind)?;
             self.shadows.insert(loc);
             Ok(b)
@@ -86,7 +91,7 @@ impl TransactionManager_ {
     fn shadow(&mut self, old_loc: u32, kind: &Kind) -> Result<WriteProxy> {
         if self.shadows.contains(&old_loc) {
             Ok(self.cache.write_lock(old_loc, kind)?)
-        } else if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata() {
+        } else if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata()? {
             let old = self.cache.read_lock(old_loc, kind)?;
             let mut new = self.cache.zero_lock(loc, kind)?;
             self.shadows.insert(loc);
@@ -117,9 +122,9 @@ impl TransactionManager {
         }
     }
 
-    pub fn commit(&self) -> Result<()> {
+    pub fn commit(&self, roots: &[u32]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.commit()
+        inner.commit(roots)
     }
 
     pub fn abort(&self) {
