@@ -8,6 +8,7 @@ use crate::block_allocator::BlockRef;
 use crate::block_cache::*;
 use crate::block_kinds::*;
 use crate::byte_types::*;
+use crate::packed_array::*;
 use crate::spine::*;
 use crate::transaction_manager::*;
 
@@ -41,8 +42,8 @@ pub struct Node<Data> {
 
     flags: U32<Data>,
     nr_entries: U32<Data>,
-    keys: U32Array<Data>,
-    values: U32Array<Data>,
+    keys: PArray<u32, Data>,
+    values: PArray<u32, Data>,
 }
 
 impl<Data: Readable> Node<Data> {
@@ -55,8 +56,8 @@ impl<Data: Readable> Node<Data> {
 
         let flags = U32::new(flags);
         let nr_entries = U32::new(nr_entries);
-        let keys = U32Array::new(keys, nr_entries.get() as usize);
-        let values = U32Array::new(values, nr_entries.get() as usize);
+        let keys = PArray::new(keys, nr_entries.get() as usize);
+        let values = PArray::new(values, nr_entries.get() as usize);
 
         Self {
             loc,
@@ -82,8 +83,8 @@ impl<Data: Readable> Node<Data> {
 
 impl<Data: Writeable> Node<Data> {
     fn insert_at(&mut self, idx: usize, key: u32, value: u32) {
-        self.keys.insert_at(idx, key);
-        self.values.insert_at(idx, value);
+        self.keys.insert_at(idx, &key);
+        self.values.insert_at(idx, &value);
         self.nr_entries.inc(1);
     }
 
@@ -281,7 +282,7 @@ mod insert_utils {
 
         // Adjust the parent keys
         let first_key = right.first_key().unwrap();
-        parent.keys.set(parent_idx, first_key);
+        parent.keys.set(parent_idx, &first_key);
 
         // Choose the correct child in the spine
         if key < first_key {
@@ -301,7 +302,7 @@ mod insert_utils {
 
         // Adjust the parent keys
         let first_key = right.first_key().unwrap();
-        parent.keys.set(parent_idx + 1, first_key);
+        parent.keys.set(parent_idx + 1, &first_key);
 
         // Choose the correct child in the spine
         if key >= first_key {
@@ -331,8 +332,8 @@ mod insert_utils {
         let mut parent = w_node(spine.parent());
 
         let first_key = right.first_key().unwrap();
-        parent.keys.insert_at(idx + 1, first_key);
-        parent.values.insert_at(idx + 1, right.loc);
+        parent.keys.insert_at(idx + 1, &first_key);
+        parent.values.insert_at(idx + 1, &right.loc);
         parent.nr_entries.inc(1);
 
         // Choose the correct child in the spine
@@ -359,7 +360,7 @@ mod insert_utils {
 
             // patch up the parent
             let r_first_key = right.first_key().unwrap();
-            parent.keys.set(1, r_first_key);
+            parent.keys.set(1, &r_first_key);
 
             let m_first_key = middle.first_key().unwrap();
             parent.insert_at(1, m_first_key, middle.loc);
@@ -381,7 +382,7 @@ mod insert_utils {
 
             // patch up the parent
             let r_first_key = right.first_key().unwrap();
-            parent.keys.set(idx, r_first_key);
+            parent.keys.set(idx, &r_first_key);
 
             let m_first_key = middle.first_key().unwrap();
             parent.insert_at(idx, m_first_key, middle.loc);
@@ -446,12 +447,12 @@ mod insert_utils {
                 child = w_node(spine.child());
             }
 
-            idx = child.keys.bsearch(key);
+            idx = child.keys.bsearch(&key);
 
             if child.is_leaf() {
                 if idx < 0 {
-                    child.keys.insert_at(0, key);
-                    child.values.insert_at(0, value);
+                    child.keys.insert_at(0, &key);
+                    child.values.insert_at(0, &value);
                     child.nr_entries.inc(1);
                 } else if idx as usize >= child.keys.len() {
                     // insert
@@ -461,11 +462,11 @@ mod insert_utils {
                 } else {
                     if child.keys.get(idx as usize) == key {
                         // overwrite
-                        child.values.set(idx as usize, value);
+                        child.values.set(idx as usize, &value);
                     } else {
                         ensure!(child.keys.get(idx as usize) < key);
-                        child.keys.insert_at(idx as usize + 1, key);
-                        child.values.insert_at(idx as usize + 1, value);
+                        child.keys.insert_at(idx as usize + 1, &key);
+                        child.values.insert_at(idx as usize + 1, &value);
                         child.nr_entries.inc(1);
                     }
                 }
@@ -474,7 +475,7 @@ mod insert_utils {
             } else {
                 if idx < 0 {
                     // adjust the keys as we go down the spine.
-                    child.keys.set(0, key);
+                    child.keys.set(0, &key);
                     idx = 0;
                 }
 
@@ -483,7 +484,7 @@ mod insert_utils {
                 // Patch up the parent
                 let loc = spine.child().loc();
                 let mut p = w_node(spine.parent());
-                p.values.set(idx as usize, loc);
+                p.values.set(idx as usize, &loc);
             }
         }
 
@@ -534,7 +535,7 @@ mod remove_utilities {
             // rebalance
             let target_left = (nr_left + nr_right) / 2;
             shift_(left, right, nr_left as isize - target_left as isize);
-            parent.keys.set(r.index, right.first_key().unwrap());
+            parent.keys.set(r.index, &right.first_key().unwrap());
         }
     }
 
@@ -577,7 +578,7 @@ mod remove_utilities {
             shift_(center, right, shift as isize);
         }
 
-        parent.keys.set(r.index, right.first_key().unwrap());
+        parent.keys.set(r.index, &right.first_key().unwrap());
         parent.remove_at(c.index);
         r.index -= 1;
 
@@ -629,8 +630,8 @@ mod remove_utilities {
             shift_(left, center, nr_left - target_left);
         }
 
-        parent.keys.set(c.index, center.first_key().unwrap());
-        parent.keys.set(r.index, right.first_key().unwrap());
+        parent.keys.set(c.index, &center.first_key().unwrap());
+        parent.keys.set(r.index, &right.first_key().unwrap());
     }
 
     fn rebalance3_(parent: &mut WNode, l: &mut Child, c: &mut Child, r: &mut Child) {
@@ -688,7 +689,7 @@ mod remove_utilities {
             let gc = spine.peek(gc_loc)?;
             child.rw().copy_from_slice(gc.r());
         } else {
-            let idx = child.keys.bsearch(key);
+            let idx = child.keys.bsearch(&key);
             if idx < 0 {
                 // key isn't in the tree
                 todo!();
@@ -711,7 +712,7 @@ mod remove_utilities {
 
     // Returns the old value, if present
     fn do_leaf(child: &mut WNode, key: u32) -> Result<Option<u32>> {
-        let idx = child.keys.bsearch(key);
+        let idx = child.keys.bsearch(&key);
         if idx < 0 || idx as u32 >= child.nr_entries.get() || child.keys.get(idx as usize) != key {
             return Ok(None);
         }
@@ -730,7 +731,7 @@ mod remove_utilities {
             if !spine.top() {
                 // patch up the parent node
                 let mut parent = w_node(spine.parent());
-                parent.values.set(idx as usize, child.loc);
+                parent.values.set(idx as usize, &child.loc);
             }
 
             if child.is_leaf() {
@@ -745,7 +746,7 @@ mod remove_utilities {
                 return do_leaf(&mut child, key);
             }
 
-            idx = child.keys.bsearch(key);
+            idx = child.keys.bsearch(&key);
 
             // We know the key is present or else rebalance_children would have failed.
             // FIXME: check this
@@ -786,7 +787,7 @@ impl BTree {
         loop {
             let node = Node::new(block.loc(), block);
 
-            let idx = node.keys.bsearch(key);
+            let idx = node.keys.bsearch(&key);
             if idx < 0 || idx >= node.nr_entries.get() as isize {
                 return None;
             }
@@ -910,7 +911,7 @@ mod test {
         nr_data_blocks: u64,
     ) -> Result<Arc<Mutex<BlockAllocator>>> {
         let mut allocator = BlockAllocator::new(cache, nr_data_blocks)?;
-        allocator.reserve_metadata(0); // reserve the superblock
+        allocator.reserve_metadata(0)?; // reserve the superblock
         Ok(Arc::new(Mutex::new(allocator)))
     }
 
