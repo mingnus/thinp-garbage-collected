@@ -100,7 +100,7 @@ impl MTree {
         Ok(results)
     }
 
-    fn remove_range(&mut self, kbegin: u32, kend: u32) -> Result<()> {
+    pub fn remove(&mut self, kbegin: u32, kend: u32) -> Result<()> {
         eprintln!("remove_range({}, {})", kbegin, kend);
         let (_idx_begin, infos) = self.index.remove(kbegin, kend)?;
 
@@ -131,7 +131,7 @@ impl MTree {
     pub fn insert(&mut self, kbegin: u32, m: &Mapping) -> Result<()> {
         let kend = kbegin + m.len as u32;
 
-        self.remove_range(kbegin, kend)?;
+        self.remove(kbegin, kend)?;
 
         match self.index.info_for_insert(kbegin, kbegin + m.len as u32)? {
             InfoResult::New(_info_idx) => {
@@ -262,7 +262,7 @@ mod mtree {
         }
 
         fn remove(&mut self, kbegin: u32, kend: u32) -> Result<()> {
-            self.tree.remove_range(kbegin, kend)
+            self.tree.remove(kbegin, kend)
         }
 
         fn commit(&mut self) -> Result<()> {
