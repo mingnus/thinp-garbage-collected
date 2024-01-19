@@ -465,6 +465,7 @@ dependencies = [
  "fixedbitset",
  "linked-hash-map",
  "rand",
+ "rand_chacha",
  "roaring",
  "thinp",
 ]

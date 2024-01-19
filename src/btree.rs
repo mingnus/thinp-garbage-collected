@@ -38,6 +38,8 @@ fn write_node_header<W: Write>(w: &mut W, hdr: NodeHeader) -> Result<()> {
 
 // FIXME: doesn't need to be pub
 pub struct Node<Data> {
+    // We cache a copy of the loc because the underlying proxy isn't available.
+    // This doesn't get written to disk.
     loc: u32,
 
     flags: U32<Data>,
@@ -762,8 +764,27 @@ pub struct BTree {
     root: u32,
 }
 
+pub struct Cursor<'a> {
+    tree: &'a BTree,
+    kbegin: u32,
+    kend: u32,
+    spine: Vec<u32>,
+}
+
+impl<'a> Cursor<'a> {
+    /// Returns (key, value) for the current position.  Returns None
+    /// if the cursor has run out of values.
+    pub fn get(&self) -> Option<(u32, u32)> {
+        todo!();
+    }
+
+    pub fn next(&mut self) {
+        todo!();
+    }
+}
+
 impl BTree {
-    pub fn new(tm: Arc<TransactionManager>, root: u32) -> Self {
+    pub fn open_tree(tm: Arc<TransactionManager>, root: u32) -> Self {
         Self { tm, root }
     }
 
@@ -780,6 +801,13 @@ impl BTree {
     pub fn root(&self) -> u32 {
         self.root
     }
+
+    // FIXME: return a Result
+    pub fn cursor(&self, _key: u32) -> Cursor {
+        todo!();
+    }
+
+    //-------------------------------
 
     pub fn lookup(&self, key: u32) -> Option<u32> {
         let mut block = self.tm.read(self.root, &BNODE_KIND).unwrap();
@@ -817,6 +845,22 @@ impl BTree {
         let r = remove_utilities::remove(&mut spine, key)?;
         self.root = spine.get_root();
         Ok(r)
+    }
+
+    //-------------------------------
+
+    /// Returns a vec of key, value pairs
+    pub fn lookup_range(&self, _key_low: u32, _key_high: u32) -> Result<Vec<(u32, u32)>> {
+        todo!();
+    }
+
+    pub fn insert_range(&mut self, _kvs: &[(u32, u32)]) -> Result<()> {
+        todo!();
+    }
+
+    /// Returns any values removed
+    pub fn remove_range(&mut self, _key_low: u32, _key_high: u32) -> Result<Vec<u32>> {
+        todo!();
     }
 
     //-------------------------------

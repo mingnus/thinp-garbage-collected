@@ -6,6 +6,7 @@ pub mod btree;
 pub mod byte_types;
 pub mod core;
 pub mod extent_allocator;
+pub mod mtree;
 pub mod packed_array;
 pub mod spine;
 pub mod thin_metadata;
