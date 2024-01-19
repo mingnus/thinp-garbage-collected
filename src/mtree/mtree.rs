@@ -11,7 +11,7 @@ use crate::block_cache::*;
 use crate::block_kinds::*;
 use crate::btree::*;
 use crate::byte_types::*;
-use crate::index::*;
+use crate::mtree::index::*;
 use crate::packed_array::*;
 use crate::transaction_manager::*;
 
@@ -259,38 +259,6 @@ fn w_node(block: WriteProxy) -> WNode {
 
 fn r_node(block: ReadProxy) -> RNode {
     Node::new(block.loc(), block)
-}
-
-fn init_node(mut block: WriteProxy, is_leaf: bool) -> Result<WNode> {
-    todo!();
-
-    /*
-    let loc = block.loc();
-
-    // initialise the block
-    let mut w = std::io::Cursor::new(block.rw());
-    let hdr = BlockHeader {
-        loc,
-        kind: BNODE_KIND,
-        sum: 0,
-    };
-    write_block_header(&mut w, &hdr)?;
-
-    write_node_header(
-        &mut w,
-        NodeHeader {
-            flags: if is_leaf {
-                BTreeFlags::Leaf
-            } else {
-                BTreeFlags::Internal
-            } as u32,
-            nr_entries: 0,
-        },
-    )?;
-    drop(w);
-
-    Ok(w_node(block))
-    */
 }
 
 //-------------------------------------------------------------------------
