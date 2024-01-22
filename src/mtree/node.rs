@@ -198,6 +198,16 @@ impl<Data: Readable> Node<Data> {
         }
     }
 
+    /// Returns the highest key referenced by this node (including
+    /// the len of the final mapping).
+    pub fn last_key(&self) -> Option<u32> {
+        if self.keys.len() == 0 {
+            None
+        } else {
+            Some(self.keys.get(0) + self.mappings.get(self.mappings.len() - 1).len as u32)
+        }
+    }
+
     pub fn dump(&self) {
         let nr_entries = self.nr_entries.get();
         eprintln!("Node: loc = {}, nr_entries = {}", self.loc, nr_entries);

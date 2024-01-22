@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::block_kinds::*;
+use crate::byte_types::*;
 use crate::mtree::index::*;
 use crate::mtree::node::*;
 use crate::transaction_manager::*;
@@ -130,6 +131,15 @@ impl MTree {
         init_node(b)
     }
 
+    fn info_from_node<R: Readable>(n: &Node<R>) -> BlockInfo {
+        BlockInfo {
+            loc: n.loc,
+            nr_entries: n.nr_entries.get(),
+            kbegin: n.first_key().unwrap(),
+            kend: n.last_key().unwrap(),
+        }
+    }
+
     pub fn insert(&mut self, kbegin: u32, m: &Mapping) -> Result<()> {
         let kend = kbegin + m.len as u32;
 
@@ -140,11 +150,10 @@ impl MTree {
                 eprintln!("empty branch");
                 // Create a new node
                 let mut n = self.alloc_node()?;
-                let loc = n.loc;
                 n.insert_at(0, kbegin, *m)?;
 
                 let info = BlockInfo {
-                    loc,
+                    loc: n.loc,
                     nr_entries: 1,
                     kbegin,
                     kend: kbegin + m.len as u32,
@@ -153,7 +162,7 @@ impl MTree {
                 // FIXME: we know where this should be inserted
                 self.index.insert(&infos)?;
             }
-            InfoResult::Update(info_idx, mut info) => {
+            InfoResult::Update(_info_idx, mut info) => {
                 eprintln!("non empty branch");
                 let left = self.tm.shadow(info.loc, &MNODE_KIND)?;
                 let mut left_n = w_node(left);
@@ -164,12 +173,10 @@ impl MTree {
                 // to examine the node quite closely to work out how much space we need.
 
                 if nr_entries == MAX_ENTRIES as u32 {
-                    /*
                     eprintln!("splitting");
                     // FIXME: factor out
 
                     let right = self.tm.new_block(&MNODE_KIND)?;
-                    let right_loc = right.loc();
                     let mut right_n = w_node(right);
                     let nr_right = nr_entries / 2;
 
@@ -177,11 +184,15 @@ impl MTree {
                     right_n.prepend(&ks, &ms);
 
                     // Rejig infos
-                    todo!();
-                    */
+                    let l_info = Self::info_from_node(&left_n);
+                    let r_info = Self::info_from_node(&right_n);
+                    self.index.insert(&[l_info, r_info])?;
 
-                    // left_n may be in the right now.
-                    todo!();
+                    // FIXME: inefficient
+                    // retry from the beginning
+                    drop(left_n);
+                    drop(right_n);
+                    return self.insert(kbegin, m);
                 } else {
                     let idx = left_n.keys.bsearch(&kbegin);
                     eprintln!("bsearch returned: {}, searching for {}", idx, kbegin);
@@ -355,14 +366,11 @@ mod mtree {
         let mut fix = Fixture::new(1024, 102400)?;
         fix.commit()?;
 
-        let count = 100;
+        let count = 10000;
         let mappings = gen_non_overlapping_mappings(count);
-        eprintln!("mappings: {:?}", mappings);
 
         for (kbegin, m) in mappings {
-            eprintln!(">>> inserting: ({}, {:?})", kbegin, m);
             fix.insert(kbegin, &m)?;
-            eprintln!("<<< inserting");
         }
         fix.commit()?; // FIXME: shouldn't be needed
 
