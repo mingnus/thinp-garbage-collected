@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Read, Write};
 use std::mem::size_of;
@@ -198,32 +198,25 @@ impl<Data: Readable> Node<Data> {
         }
     }
 
-    pub fn read_mappings(
-        &self,
-        idx: usize,
-        kend: u32,
-        results: &mut Vec<(u32, Mapping)>,
-    ) -> Result<()> {
-        for i in idx..self.keys.len() {
-            let k = self.keys.get(i as usize);
-            let m = self.mappings.get(i as usize);
-
-            if k >= kend {
-                break;
-            }
-
-            results.push((k, m));
+    pub fn dump(&self) {
+        let nr_entries = self.nr_entries.get();
+        eprintln!("Node: loc = {}, nr_entries = {}", self.loc, nr_entries);
+        for i in 0..nr_entries as usize {
+            eprintln!("    ({}, {:?})", self.keys.get(i), self.mappings.get(i));
         }
-
-        Ok(())
     }
 }
 
 impl<Data: Writeable> Node<Data> {
-    pub fn insert_at(&mut self, idx: usize, key: u32, value: Mapping) {
+    pub fn insert_at(&mut self, idx: usize, key: u32, value: Mapping) -> Result<()> {
+        if self.nr_entries.get() == MAX_ENTRIES as u32 {
+            return Err(anyhow!("attempt to insert into full node"));
+        }
+
         self.keys.insert_at(idx, &key);
         self.mappings.insert_at(idx, &value);
         self.nr_entries.inc(1);
+        Ok(())
     }
 
     pub fn remove_at(&mut self, idx: usize) {
@@ -259,59 +252,6 @@ impl<Data: Writeable> Node<Data> {
         self.nr_entries.dec(count as u32);
         (keys, mappings)
     }
-
-    // FIXME: what if we split a single entry into two and there's no space?
-    pub fn remove_range(&mut self, kbegin: u32, kend: u32) {
-        use TrimOp::*;
-
-        // FIXME: slow, but hopefully correct
-        let mut w_idx = 0;
-
-        for r_idx in 0..self.nr_entries.get() as usize {
-            let k = self.keys.get(r_idx);
-            let mut m = self.mappings.get(r_idx);
-
-            match trim(k..(k + m.len as u32), kbegin..kend) {
-                Noop => {
-                    self.keys.set(w_idx, &k);
-                    self.mappings.set(w_idx, &m);
-                    w_idx += 1;
-                }
-                RemoveAll => { /* do nothing */ }
-                RemoveCenter(start, end) => {
-                    assert!(self.nr_entries.get() < MAX_ENTRIES as u32);
-
-                    // write a fragment from before the trim range
-                    self.keys.set(w_idx, &k);
-                    m.len = (start - k) as u16;
-                    self.mappings.set(w_idx, &m);
-                    w_idx += 1;
-
-                    // write a fragment from after the trim range
-                    self.keys.set(w_idx, &end);
-                    let delta = end - k;
-                    m.data_begin += delta;
-                    m.len -= delta as u16;
-                    self.mappings.set(w_idx, &m);
-                    w_idx += 1;
-                }
-                RemoveFront(new_start) => {
-                    self.keys.set(w_idx, &new_start);
-                    let delta = new_start - k;
-                    m.data_begin += delta;
-                    m.len -= delta as u16;
-                    self.mappings.set(w_idx, &m);
-                    w_idx += 1;
-                }
-                RemoveBack(new_end) => {
-                    self.keys.set(w_idx, &k);
-                    m.len -= ((k + m.len as u32) - new_end) as u16;
-                    self.mappings.set(w_idx, &m);
-                    w_idx += 1;
-                }
-            }
-        }
-    }
 }
 
 pub type RNode = Node<ReadProxy>;
@@ -340,6 +280,210 @@ pub fn init_node(mut block: WriteProxy) -> Result<WNode> {
     drop(w);
 
     Ok(w_node(block))
+}
+
+// FIXME: what if we split a single entry into two and there's no space?
+pub fn remove_range<W: Writeable>(n: &mut Node<W>, kbegin: u32, kend: u32) {
+    use TrimOp::*;
+
+    // FIXME: slow, but hopefully correct
+    let mut w_idx = 0;
+
+    for r_idx in 0..n.nr_entries.get() as usize {
+        let k = n.keys.get(r_idx);
+        let mut m = n.mappings.get(r_idx);
+
+        match trim(k..(k + m.len as u32), kbegin..kend) {
+            Noop => {
+                n.keys.set(w_idx, &k);
+                n.mappings.set(w_idx, &m);
+                w_idx += 1;
+            }
+            RemoveAll => { /* do nothing */ }
+            RemoveCenter(start, end) => {
+                assert!(n.nr_entries.get() < MAX_ENTRIES as u32);
+
+                // write a fragment from before the trim range
+                n.keys.set(w_idx, &k);
+                m.len = (start - k) as u16;
+                n.mappings.set(w_idx, &m);
+                w_idx += 1;
+
+                // write a fragment from after the trim range
+                n.keys.set(w_idx, &end);
+                let delta = end - k;
+                m.data_begin += delta;
+                m.len -= delta as u16;
+                n.mappings.set(w_idx, &m);
+                w_idx += 1;
+            }
+            RemoveFront(new_start) => {
+                n.keys.set(w_idx, &new_start);
+                let delta = new_start - k;
+                m.data_begin += delta;
+                m.len -= delta as u16;
+                n.mappings.set(w_idx, &m);
+                w_idx += 1;
+            }
+            RemoveBack(new_end) => {
+                n.keys.set(w_idx, &k);
+                m.len -= ((k + m.len as u32) - new_end) as u16;
+                n.mappings.set(w_idx, &m);
+                w_idx += 1;
+            }
+        }
+    }
+}
+
+pub fn read_mappings<R: Readable>(
+    n: &Node<R>,
+    idx: usize,
+    kend: u32,
+    results: &mut Vec<(u32, Mapping)>,
+) -> Result<()> {
+    for i in idx..n.keys.len() {
+        let k = n.keys.get(i as usize);
+        let m = n.mappings.get(i as usize);
+
+        if k >= kend {
+            break;
+        }
+
+        results.push((k, m));
+    }
+
+    Ok(())
+}
+
+//-------------------------------------------------------------------------
+
+#[cfg(test)]
+mod node {
+
+    use super::*;
+    use crate::block_allocator::*;
+    use crate::core::*;
+    use crate::transaction_manager::*;
+    use anyhow::{ensure, Result};
+    use std::sync::{Arc, Mutex};
+    use thinp::io_engine::*;
+
+    fn mk_engine(nr_blocks: u32) -> Arc<dyn IoEngine> {
+        Arc::new(CoreIoEngine::new(nr_blocks as u64))
+    }
+
+    fn mk_allocator(
+        cache: Arc<MetadataCache>,
+        nr_data_blocks: u64,
+    ) -> Result<Arc<Mutex<BlockAllocator>>> {
+        let mut allocator = BlockAllocator::new(cache, nr_data_blocks)?;
+        allocator.reserve_metadata(0)?; // reserve the superblock
+        Ok(Arc::new(Mutex::new(allocator)))
+    }
+
+    #[allow(dead_code)]
+    struct Fixture {
+        engine: Arc<dyn IoEngine>,
+        cache: Arc<MetadataCache>,
+        allocator: Arc<Mutex<BlockAllocator>>,
+        tm: Arc<TransactionManager>,
+    }
+
+    impl Fixture {
+        fn new(nr_metadata_blocks: u32, nr_data_blocks: u64) -> Result<Self> {
+            let engine = mk_engine(nr_metadata_blocks);
+            let cache = Arc::new(MetadataCache::new(engine.clone(), 16)?);
+            let allocator = mk_allocator(cache.clone(), nr_data_blocks)?;
+            let tm = Arc::new(TransactionManager::new(allocator.clone(), cache.clone()));
+
+            Ok(Self {
+                engine,
+                cache,
+                allocator,
+                tm,
+            })
+        }
+    }
+
+    #[test]
+    fn empty() -> Result<()> {
+        let fix = Fixture::new(1024, 1024)?;
+        let b = fix.tm.new_block(&MNODE_KIND)?;
+        let n = Node::new(b.loc(), b);
+        ensure!(n.nr_entries.get() == 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert() -> Result<()> {
+        let fix = Fixture::new(1024, 1024)?;
+        let b = fix.tm.new_block(&MNODE_KIND)?;
+        let mut n = Node::new(b.loc(), b);
+
+        let pairs = [
+            (
+                128,
+                Mapping {
+                    data_begin: 100,
+                    len: 16,
+                    time: 0,
+                },
+            ),
+            (
+                256,
+                Mapping {
+                    data_begin: 200,
+                    len: 128,
+                    time: 1,
+                },
+            ),
+        ];
+
+        for (k, m) in pairs.iter().rev() {
+            n.insert_at(0, *k, *m)?;
+        }
+
+        let mut pairs2 = Vec::new();
+        read_mappings(&n, 0, 100000, &mut pairs2)?;
+
+        ensure!(&pairs[..] == &pairs2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn insert_when_full() -> Result<()> {
+        let fix = Fixture::new(1024, 1024)?;
+        let b = fix.tm.new_block(&MNODE_KIND)?;
+        let mut n = Node::new(b.loc(), b);
+
+        for i in 0..MAX_ENTRIES {
+            n.insert_at(
+                i,
+                i as u32,
+                Mapping {
+                    data_begin: i as u32,
+                    len: 1,
+                    time: 0,
+                },
+            )?;
+        }
+
+        ensure!(n
+            .insert_at(
+                0,
+                0,
+                Mapping {
+                    data_begin: 0,
+                    len: 1,
+                    time: 0
+                }
+            )
+            .is_err());
+
+        Ok(())
+    }
 }
 
 //-------------------------------------------------------------------------

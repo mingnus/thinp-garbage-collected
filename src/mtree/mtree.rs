@@ -42,15 +42,16 @@ impl MTree {
                     m_idx = 0;
                 }
 
-                n.read_mappings(m_idx as usize, kend, &mut results)?;
+                read_mappings(&n, m_idx as usize, kend, &mut results)?;
             } else {
-                n.read_mappings(0, kend, &mut results)?;
+                read_mappings(&n, 0, kend, &mut results)?;
             }
         }
 
         Ok(results)
     }
 
+    // FIXME: this also modifies the underlying nodes.  Rename.
     fn trim_infos(&self, infos: &[BlockInfo], kbegin: u32, kend: u32) -> Result<Vec<BlockInfo>> {
         eprintln!("trim_infos");
         let mut results = Vec::new();
@@ -59,16 +60,16 @@ impl MTree {
             let b = self.tm.shadow(info.loc, &MNODE_KIND)?;
             let mut n = w_node(b);
 
-            eprintln!(">>> n_remove_range");
-            n.remove_range(kbegin, kend);
-            eprintln!("<<< n_remove_range");
+            remove_range(&mut n, kbegin, kend);
+
             let nr_entries = n.nr_entries.get();
             if nr_entries > 0 {
+                let idx = nr_entries as usize - 1;
                 results.push(BlockInfo {
                     loc: n.loc,
                     nr_entries,
                     kbegin: n.keys.get(0),
-                    kend: n.keys.get(nr_entries as usize - 1),
+                    kend: n.keys.get(idx) + n.mappings.get(idx).len as u32,
                 })
             }
         }
@@ -109,6 +110,7 @@ impl MTree {
             return Ok(());
         }
 
+        eprintln!("untrimmed infos: {:?}", infos);
         let infos = self.trim_infos(&infos, kbegin, kend)?;
         eprintln!("trimmed infos: {:?}", infos);
 
@@ -139,7 +141,7 @@ impl MTree {
                 // Create a new node
                 let mut n = self.alloc_node()?;
                 let loc = n.loc;
-                n.insert_at(0, kbegin, *m);
+                n.insert_at(0, kbegin, *m)?;
 
                 let info = BlockInfo {
                     loc,
@@ -151,21 +153,36 @@ impl MTree {
                 // FIXME: we know where this should be inserted
                 self.index.insert(&infos)?;
             }
-            InfoResult::Update(_info_idx, mut info) => {
+            InfoResult::Update(info_idx, mut info) => {
                 eprintln!("non empty branch");
                 let left = self.tm.shadow(info.loc, &MNODE_KIND)?;
                 let mut left_n = w_node(left);
                 let nr_entries = left_n.nr_entries.get();
 
+                // Inserting a new mapping can consume 0, 1 or 2 spaces in a node.  We
+                // don't want to split a node if we absolutely need to.  But we also have
+                // to examine the node quite closely to work out how much space we need.
+
                 if nr_entries == MAX_ENTRIES as u32 {
+                    /*
                     eprintln!("splitting");
-                    // split the node
+                    // FIXME: factor out
+
+                    let right = self.tm.new_block(&MNODE_KIND)?;
+                    let right_loc = right.loc();
+                    let mut right_n = w_node(right);
+                    let nr_right = nr_entries / 2;
+
+                    let (ks, ms) = left_n.remove_right(nr_right as usize);
+                    right_n.prepend(&ks, &ms);
+
+                    // Rejig infos
+                    todo!();
+                    */
+
+                    // left_n may be in the right now.
                     todo!();
                 } else {
-                    for i in 0..left_n.keys.len() {
-                        eprintln!("key[{}] = {}", i, left_n.keys.get(i));
-                    }
-
                     let idx = left_n.keys.bsearch(&kbegin);
                     eprintln!("bsearch returned: {}, searching for {}", idx, kbegin);
 
@@ -175,7 +192,7 @@ impl MTree {
                     // position.
                     let idx = (idx + 1) as usize;
 
-                    left_n.insert_at(idx as usize, kbegin, *m);
+                    left_n.insert_at(idx as usize, kbegin, *m)?;
                     info.nr_entries += 1;
                     info.kbegin = left_n.keys.get(0);
                     let last_idx = info.nr_entries as usize - 1;
@@ -338,7 +355,7 @@ mod mtree {
         let mut fix = Fixture::new(1024, 102400)?;
         fix.commit()?;
 
-        let count = 10;
+        let count = 100;
         let mappings = gen_non_overlapping_mappings(count);
         eprintln!("mappings: {:?}", mappings);
 
