@@ -369,10 +369,14 @@ mod mtree {
         let count = 10000;
         let mappings = gen_non_overlapping_mappings(count);
 
-        for (kbegin, m) in mappings {
-            fix.insert(kbegin, &m)?;
+        for (kbegin, m) in &mappings {
+            fix.insert(*kbegin, m)?;
         }
         fix.commit()?; // FIXME: shouldn't be needed
+
+        let high_key = mappings.last().unwrap().0 + 1;
+        let m2 = fix.lookup(0, high_key)?;
+        ensure!(m2 == mappings);
 
         Ok(())
     }
