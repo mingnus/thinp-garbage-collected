@@ -1229,8 +1229,8 @@ mod test {
         cache: Arc<MetadataCache>,
         nr_data_blocks: u64,
     ) -> Result<Arc<Mutex<BlockAllocator>>> {
-        let mut allocator = BlockAllocator::new(cache, nr_data_blocks)?;
-        allocator.reserve_metadata(0)?; // reserve the superblock
+        const SUPERBLOCK_LOCATION: u32 = 0;
+        let mut allocator = BlockAllocator::new(cache, nr_data_blocks, SUPERBLOCK_LOCATION)?;
         Ok(Arc::new(Mutex::new(allocator)))
     }
 
