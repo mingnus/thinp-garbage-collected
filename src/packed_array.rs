@@ -176,6 +176,12 @@ impl<S: Serializable, Data: Writeable> PArray<S, Data> {
             self.set(nr_entries + i, v);
         }
     }
+
+    pub fn append_single(&mut self, v: &S) {
+        assert!(self.nr_entries <= self.max_entries);
+        self.set(self.nr_entries, v);
+        self.nr_entries += 1;
+    }
 }
 
 //-------------------------------------------------------------------------
