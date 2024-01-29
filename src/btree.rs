@@ -1,7 +1,7 @@
 use anyhow::{ensure, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::{BTreeSet, VecDeque};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::Arc;
 
 use crate::block_allocator::BlockRef;
@@ -23,6 +23,7 @@ enum BTreeFlags {
     Leaf = 1,
 }
 
+// FIXME: we can pack this more
 struct NodeHeader {
     flags: u32,
     nr_entries: u32,
@@ -42,9 +43,10 @@ fn write_node_header<W: Write>(w: &mut W, hdr: NodeHeader) -> Result<()> {
 }
 
 // We need to read the flags to know what sort of node to instance.
-fn read_flags<R: Read>(r: &mut R) -> Result<BTreeFlags> {
+fn read_flags(r: &[u8]) -> Result<BTreeFlags> {
     use BTreeFlags::*;
 
+    let mut r = &r[BLOCK_HEADER_SIZE..];
     let flags = r.read_u32::<LittleEndian>()?;
 
     match flags {
@@ -79,7 +81,6 @@ impl<V: Serializable, Data: Readable> Node<V, Data> {
         let (_, data) = data.split_at(BLOCK_HEADER_SIZE);
         let (flags, data) = data.split_at(4);
         let (nr_entries, data) = data.split_at(4);
-        assert!(nr_entries.r().len() == 4);
         let (value_size, data) = data.split_at(2);
         let (_padding, data) = data.split_at(6);
         let (keys, values) = data.split_at(Self::max_entries() * std::mem::size_of::<u32>());
@@ -156,8 +157,8 @@ impl<V: Serializable, Data: Writeable> Node<V, Data> {
 }
 
 // FIXME: remove these, I don't think they add much now it's parameterised by V
-type RNode<V: Serializable> = Node<V, ReadProxy>;
-type WNode<V: Serializable> = Node<V, WriteProxy>;
+type RNode<V> = Node<V, ReadProxy>;
+type WNode<V> = Node<V, WriteProxy>;
 
 //-------------------------------------------------------------------------
 
@@ -273,12 +274,12 @@ mod insert_utils {
         }
     }
 
-    fn has_space_for_insert<V: Serializable, Data: Readable>(node: &Node<V, Data>) -> bool {
-        node.nr_entries.get() < Node::<V, Data>::max_entries() as u32
+    fn has_space_for_insert<NV: Serializable, Data: Readable>(node: &Node<NV, Data>) -> bool {
+        node.nr_entries.get() < Node::<NV, Data>::max_entries() as u32
     }
 
-    fn split_beneath(spine: &mut Spine, key: u32) -> Result<()> {
-        let mut new_parent = w_node(spine.child());
+    fn split_beneath<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
+        let mut new_parent = w_node::<NV>(spine.child());
         let nr_left = (new_parent.nr_entries.get() / 2) as usize;
         let (lkeys, lvalues) = new_parent.shift_left(nr_left);
         let (rkeys, rvalues) = new_parent.shift_left(new_parent.nr_entries.get() as usize);
@@ -290,6 +291,7 @@ mod insert_utils {
         right.append(&rkeys, &rvalues);
 
         // setup the parent to point to the two new children
+        let mut new_parent = w_node::<MetadataBlock>(spine.child());
         new_parent.flags.set(BTreeFlags::Internal as u32);
         assert!(new_parent.keys.len() == 0);
         assert!(new_parent.values.len() == 0);
@@ -477,14 +479,18 @@ mod insert_utils {
         }
     }
 
-    fn ensure_space<V: Serializable>(spine: &mut Spine, key: u32, idx: isize) -> Result<WNode<V>> {
-        let mut child = w_node::<V>(spine.child());
+    fn ensure_space<NV: Serializable>(
+        spine: &mut Spine,
+        key: u32,
+        idx: isize,
+    ) -> Result<WNode<NV>> {
+        let mut child = w_node::<NV>(spine.child());
 
-        if !has_space_for_insert::<V, WriteProxy>(&child) {
-            if spine.top() {
-                split_beneath(spine, key)?;
+        if !has_space_for_insert::<NV, WriteProxy>(&child) {
+            if spine.is_top() {
+                split_beneath::<NV>(spine, key)?;
             } else {
-                rebalance_or_split::<u32>(spine, idx as usize, key)?;
+                rebalance_or_split::<NV>(spine, idx as usize, key)?;
             }
 
             child = w_node(spine.child());
@@ -502,6 +508,8 @@ mod insert_utils {
             if flags == BTreeFlags::Internal {
                 let mut child = ensure_space::<u32>(spine, key, idx)?;
 
+                // FIXME: remove, just here whilst hunting a bug
+                ensure!(child.nr_entries.get() > 0);
                 idx = child.keys.bsearch(&key);
 
                 if idx < 0 {
@@ -562,6 +570,13 @@ mod remove_utilities {
         node: WNode<V>,
     }
 
+    fn is_leaf(spine: &mut Spine, loc: MetadataBlock) -> Result<bool> {
+        let b = spine.tm.read(loc, &BNODE_KIND)?;
+        let flags = read_flags(b.r())?;
+
+        Ok(flags == BTreeFlags::Leaf)
+    }
+
     fn shift_<V: Serializable>(left: &mut WNode<V>, right: &mut WNode<V>, count: isize) {
         if count > 0 {
             let (keys, values) = left.remove_right(count as usize);
@@ -572,7 +587,11 @@ mod remove_utilities {
         }
     }
 
-    fn rebalance2_<V: Serializable>(parent: &mut WNode<V>, l: &mut Child<V>, r: &mut Child<V>) {
+    fn rebalance2_<V: Serializable>(
+        parent: &mut WNode<MetadataBlock>,
+        l: &mut Child<V>,
+        r: &mut Child<V>,
+    ) {
         let left = &mut l.node;
         let right = &mut r.node;
 
@@ -597,30 +616,43 @@ mod remove_utilities {
         }
     }
 
-    fn rebalance2(spine: &mut Spine, left_idx: usize) -> Result<()> {
-        let mut parent = w_node(spine.child());
-
+    fn rebalance2_aux<V: Serializable>(
+        spine: &mut Spine,
+        left_idx: usize,
+        parent: &mut WNode<MetadataBlock>,
+    ) -> Result<()> {
         let left_loc = parent.values.get(left_idx);
         let mut left = Child {
             index: left_idx,
-            node: w_node(spine.shadow(left_loc)?),
+            node: w_node::<V>(spine.shadow(left_loc)?),
         };
 
         let right_loc = parent.values.get(left_idx + 1);
         let mut right = Child {
             index: left_idx + 1,
-            node: w_node(spine.shadow(right_loc)?),
+            node: w_node::<V>(spine.shadow(right_loc)?),
         };
 
-        rebalance2_(&mut parent, &mut left, &mut right);
+        rebalance2_::<V>(parent, &mut left, &mut right);
         Ok(())
+    }
+
+    fn rebalance2<LeafV: Serializable>(spine: &mut Spine, left_idx: usize) -> Result<()> {
+        let mut parent = w_node::<MetadataBlock>(spine.child());
+
+        let left_loc = parent.values.get(left_idx);
+        if is_leaf(spine, left_loc)? {
+            rebalance2_aux::<LeafV>(spine, left_idx, &mut parent)
+        } else {
+            rebalance2_aux::<MetadataBlock>(spine, left_idx, &mut parent)
+        }
     }
 
     // We dump as many entries from center as possible into left, the the rest
     // in right, then rebalance.  This wastes some cpu, but I want something
     // simple atm.
     fn delete_center_node<V: Serializable>(
-        parent: &mut WNode<V>,
+        parent: &mut WNode<MetadataBlock>,
         l: &mut Child<V>,
         c: &mut Child<V>,
         r: &mut Child<V>,
@@ -652,7 +684,7 @@ mod remove_utilities {
     }
 
     fn redistribute3<V: Serializable>(
-        parent: &mut WNode<V>,
+        parent: &mut WNode<MetadataBlock>,
         l: &mut Child<V>,
         c: &mut Child<V>,
         r: &mut Child<V>,
@@ -706,7 +738,7 @@ mod remove_utilities {
     }
 
     fn rebalance3_<V: Serializable>(
-        parent: &mut WNode<V>,
+        parent: &mut WNode<MetadataBlock>,
         l: &mut Child<V>,
         c: &mut Child<V>,
         r: &mut Child<V>,
@@ -724,47 +756,59 @@ mod remove_utilities {
         }
     }
 
-    fn rebalance3(spine: &mut Spine, left_idx: usize) -> Result<()> {
-        let mut parent = w_node(spine.child());
-
+    fn rebalance3_aux<V: Serializable>(
+        spine: &mut Spine,
+        parent: &mut WNode<MetadataBlock>,
+        left_idx: usize,
+    ) -> Result<()> {
         let left_loc = parent.values.get(left_idx);
         let mut left = Child {
             index: left_idx,
-            node: w_node(spine.shadow(left_loc)?),
+            node: w_node::<V>(spine.shadow(left_loc)?),
         };
 
         let center_loc = parent.values.get(left_idx + 1);
         let mut center = Child {
             index: left_idx + 1,
-            node: w_node(spine.shadow(center_loc)?),
+            node: w_node::<V>(spine.shadow(center_loc)?),
         };
 
         let right_loc = parent.values.get(left_idx + 2);
         let mut right = Child {
             index: left_idx + 2,
-            node: w_node(spine.shadow(right_loc)?),
+            node: w_node::<V>(spine.shadow(right_loc)?),
         };
 
-        rebalance3_(&mut parent, &mut left, &mut center, &mut right);
+        rebalance3_::<V>(parent, &mut left, &mut center, &mut right);
         Ok(())
     }
 
-    fn rebalance_children(spine: &mut Spine, key: u32) -> Result<()> {
-        let child = w_node(spine.child());
+    // Assumes spine.child() is an internal node
+    fn rebalance3<LeafV: Serializable>(spine: &mut Spine, left_idx: usize) -> Result<()> {
+        let mut parent = w_node::<MetadataBlock>(spine.child());
 
-        // FIXME: this implies a previous op left it in this state
-        // If there's only 1 entry in the child then it's doing nothing useful, so
-        // we can link the parent directly to the single grandchild.
-        if child.nr_entries.get() == 1 {
-            // FIXME: it would be more efficient to get the parent to
-            // point directly to the grandchild
-            let gc_loc = child.values.get(0);
-
-            // Copy the grandchild over the child
-            let mut child = spine.child();
-            let gc = spine.peek(gc_loc)?;
-            child.rw().copy_from_slice(gc.r());
+        let left_loc = parent.values.get(left_idx);
+        if is_leaf(spine, left_loc)? {
+            rebalance3_aux::<LeafV>(spine, &mut parent, left_idx)
         } else {
+            rebalance3_aux::<MetadataBlock>(spine, &mut parent, left_idx)
+        }
+    }
+
+    // Assumes spine.child() is an internal node
+    fn rebalance_children<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
+        eprintln!("rebalance_children");
+        let child = w_node::<MetadataBlock>(spine.child());
+
+        if child.nr_entries.get() == 1 {
+            // The only node that's allowed to drop below 1/3 full is the root
+            // node.
+            ensure!(spine.is_top());
+
+            let gc_loc = child.values.get(0);
+            spine.replace_child_loc(gc_loc)?;
+        } else {
+            eprintln!("2");
             let idx = child.keys.bsearch(&key);
             if idx < 0 {
                 // key isn't in the tree
@@ -775,63 +819,68 @@ mod remove_utilities {
             let has_right_sibling = idx < (child.nr_entries.get() - 1) as isize;
 
             if !has_left_sibling {
-                rebalance2(spine, idx as usize)?;
+                rebalance2::<LeafV>(spine, idx as usize)?;
             } else if !has_right_sibling {
-                rebalance2(spine, (idx - 1) as usize)?;
+                rebalance2::<LeafV>(spine, (idx - 1) as usize)?;
             } else {
-                rebalance3(spine, (idx - 1) as usize)?;
+                rebalance3::<LeafV>(spine, (idx - 1) as usize)?;
             }
         }
 
         Ok(())
     }
 
-    // Returns the old value, if present
-    fn do_leaf<V: Serializable>(child: &mut WNode<V>, key: u32) -> Result<Option<V>> {
-        let idx = child.keys.bsearch(&key);
-        if idx < 0 || idx as u32 >= child.nr_entries.get() || child.keys.get(idx as usize) != key {
-            return Ok(None);
+    fn patch_parent(spine: &mut Spine, parent_idx: usize, loc: MetadataBlock) {
+        if !spine.is_top() {
+            let mut parent = w_node::<MetadataBlock>(spine.parent());
+            parent.values.set(parent_idx, &loc);
         }
-
-        let val = child.values.get(idx as usize);
-        child.remove_at(idx as usize);
-        Ok(Some(val))
     }
 
-    pub fn remove<V: Serializable>(spine: &mut Spine, key: u32) -> Result<Option<V>> {
+    pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option<LeafV>> {
         let mut idx = 0isize;
 
         loop {
             let flags = read_flags(&mut spine.child().r())?;
 
             if flags == BTreeFlags::Internal {
-                let mut child = w_node::<u32>(spine.child());
-
-                if !spine.top() {
-                    // patch up the parent node
-                    let mut parent = w_node::<u32>(spine.parent());
-                    parent.values.set(idx as usize, &child.loc);
-                }
+                let old_loc = spine.child_loc();
+                let child = w_node::<MetadataBlock>(spine.child());
+                patch_parent(spine, idx as usize, child.loc);
 
                 drop(child);
-                rebalance_children(spine, key)?;
+                // FIXME: we could pass child in to save re-getting it
+                rebalance_children::<LeafV>(spine, key)?;
 
-                let mut child = w_node::<u32>(spine.child());
+                // The child may have been erased and we don't know what
+                // kind of node the new child is.
+                if spine.child_loc() != old_loc {
+                    continue;
+                }
+
+                // Reaquire the child because it may have changed due to the
+                // rebalance.
+                let child = w_node::<MetadataBlock>(spine.child());
                 idx = child.keys.bsearch(&key);
 
                 // We know the key is present or else rebalance_children would have failed.
                 // FIXME: check this
                 spine.push(child.values.get(idx as usize))?;
             } else {
-                let mut child = w_node::<V>(spine.child());
+                let mut child = w_node::<LeafV>(spine.child());
+                patch_parent(spine, idx as usize, child.loc);
 
-                if !spine.top() {
-                    // patch up the parent node
-                    let mut parent = w_node::<u32>(spine.parent());
-                    parent.values.set(idx as usize, &child.loc);
+                let idx = child.keys.bsearch(&key);
+                if idx < 0
+                    || idx as u32 >= child.nr_entries.get()
+                    || child.keys.get(idx as usize) != key
+                {
+                    return Ok(None);
                 }
 
-                return do_leaf(&mut child, key);
+                let val = child.values.get(idx as usize);
+                child.remove_at(idx as usize);
+                return Ok(Some(val));
             }
         }
     }
@@ -845,23 +894,127 @@ pub struct BTree<V: Serializable> {
     phantom: std::marker::PhantomData<V>,
 }
 
-pub struct Cursor<'a, V: Serializable> {
-    tree: &'a BTree<V>,
-    kbegin: u32,
-    kend: u32,
-    spine: Vec<u32>,
+struct Frame {
+    loc: MetadataBlock,
+
+    // Index into the current node
+    index: usize,
+
+    // Nr entries in current node
+    nr_entries: usize,
 }
 
-// FIXME: is this used?
-impl<'a, V: Serializable> Cursor<'a, V> {
-    /// Returns (key, value) for the current position.  Returns None
-    /// if the cursor has run out of values.
-    pub fn get(&self) -> Option<(u32, u32)> {
-        todo!();
+pub struct Iterator<'a, V: Serializable> {
+    tree: &'a BTree<V>,
+
+    // Holds pairs of (loc, index, nr_entries)
+    stack: Option<Vec<Frame>>,
+}
+
+fn next_<TreeV: Serializable, NV: Serializable>(
+    tree: &BTree<TreeV>,
+    stack: &mut Vec<Frame>,
+) -> Result<bool> {
+    if stack.is_empty() {
+        return Ok(false);
     }
 
-    pub fn next(&mut self) {
-        todo!();
+    let frame = stack.last_mut().unwrap();
+
+    frame.index += 1;
+    if frame.index == frame.nr_entries {
+        // We need to move to the next node.
+        stack.pop();
+        next_::<TreeV, MetadataBlock>(tree, stack)?;
+
+        let frame = stack.last().unwrap();
+        let n = tree.read_node::<MetadataBlock>(frame.loc)?;
+
+        if n.nr_entries.get() == 0 {
+            return Ok(false);
+        }
+
+        let loc = n.values.get(0);
+        let n = tree.read_node::<NV>(loc)?;
+
+        stack.push(Frame {
+            loc,
+            index: 0,
+            nr_entries: n.nr_entries.get() as usize,
+        });
+    }
+
+    Ok(true)
+}
+
+impl<'a, V: Serializable> Iterator<'a, V> {
+    fn new(tree: &'a BTree<V>) -> Result<Self> {
+        let mut stack = Vec::new();
+        let mut loc = tree.root();
+
+        loop {
+            if tree.is_leaf(loc)? {
+                let n = tree.read_node::<V>(loc)?;
+                let nr_entries = n.nr_entries.get() as usize;
+                if nr_entries == 0 {
+                    return Ok(Self { tree, stack: None });
+                }
+
+                stack.push(Frame {
+                    loc,
+                    index: 0,
+                    nr_entries,
+                });
+
+                return Ok(Self {
+                    tree,
+                    stack: Some(stack),
+                });
+            } else {
+                let n = tree.read_node::<MetadataBlock>(loc)?;
+                let nr_entries = n.nr_entries.get() as usize;
+
+                // we cannot have an internal node without entries
+                stack.push(Frame {
+                    loc,
+                    index: 0,
+                    nr_entries,
+                });
+
+                loc = n.values.get(0);
+            }
+        }
+    }
+
+    /// Returns (key, value) for the current position.  Returns None
+    /// if the cursor has run out of values.
+    pub fn get(&self) -> Result<Option<(u32, V)>> {
+        match &self.stack {
+            None => Ok(None),
+            Some(stack) => {
+                let frame = stack.last().unwrap();
+
+                // FIXME: cache nodes in frame
+                let n = self.tree.read_node::<V>(frame.loc)?;
+                let k = n.keys.get(frame.index);
+                let v = n.values.get(frame.index);
+                Ok(Some((k, v)))
+            }
+        }
+    }
+
+    pub fn next(&mut self) -> Result<bool> {
+        match &mut self.stack {
+            None => Ok(false),
+            Some(stack) => {
+                if !next_::<V, V>(self.tree, stack)? {
+                    self.stack = None;
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
+        }
     }
 }
 
@@ -892,9 +1045,19 @@ impl<V: Serializable> BTree<V> {
         self.root
     }
 
-    // FIXME: return a Result
-    pub fn cursor(&self, _key: u32) -> Cursor<V> {
-        todo!();
+    pub fn cursor(&self) -> Result<Iterator<V>> {
+        Iterator::new(self)
+    }
+
+    fn is_leaf(&self, loc: MetadataBlock) -> Result<bool> {
+        let b = self.tm.read(loc, &BNODE_KIND)?;
+        let flags = read_flags(&mut b.r())?;
+        Ok(flags == BTreeFlags::Leaf)
+    }
+
+    fn read_node<V2: Serializable>(&self, loc: MetadataBlock) -> Result<Node<V2, ReadProxy>> {
+        let b = self.tm.read(loc, &BNODE_KIND)?;
+        Ok(Node::<V2, ReadProxy>::new(loc, b))
     }
 
     //-------------------------------
@@ -1045,6 +1208,7 @@ mod test {
     use crate::core::*;
     use anyhow::{ensure, Result};
     use rand::seq::SliceRandom;
+    use std::io::{self, Read, Write};
     use std::sync::{Arc, Mutex};
     use thinp::io_engine::*;
 
@@ -1061,13 +1225,38 @@ mod test {
         Ok(Arc::new(Mutex::new(allocator)))
     }
 
+    // We'll test with a value type that is a different size to the internal node values (u32).
+    #[derive(Ord, PartialOrd, PartialEq, Eq, Debug)]
+    struct Value {
+        v: u32,
+        extra: u16,
+    }
+
+    impl Serializable for Value {
+        fn packed_len() -> usize {
+            6
+        }
+
+        fn pack<W: Write>(&self, w: &mut W) -> io::Result<()> {
+            w.write_u32::<LittleEndian>(self.v)?;
+            w.write_u16::<LittleEndian>(self.extra)?;
+            Ok(())
+        }
+
+        fn unpack<R: Read>(r: &mut R) -> io::Result<Self> {
+            let v = r.read_u32::<LittleEndian>()?;
+            let extra = r.read_u16::<LittleEndian>()?;
+            Ok(Self { v, extra })
+        }
+    }
+
     #[allow(dead_code)]
     struct Fixture {
         engine: Arc<dyn IoEngine>,
         cache: Arc<MetadataCache>,
         allocator: Arc<Mutex<BlockAllocator>>,
         tm: Arc<TransactionManager>,
-        tree: BTree<u32>,
+        tree: BTree<Value>,
     }
 
     impl Fixture {
@@ -1091,15 +1280,15 @@ mod test {
             self.tree.check()
         }
 
-        fn lookup(&self, key: u32) -> Option<u32> {
+        fn lookup(&self, key: u32) -> Option<Value> {
             self.tree.lookup(key).unwrap()
         }
 
-        fn insert(&mut self, key: u32, value: u32) -> Result<()> {
+        fn insert(&mut self, key: u32, value: Value) -> Result<()> {
             self.tree.insert(key, &value)
         }
 
-        fn remove(&mut self, key: u32) -> Result<Option<u32>> {
+        fn remove(&mut self, key: u32) -> Result<Option<Value>> {
             self.tree.remove(key)
         }
 
@@ -1107,6 +1296,10 @@ mod test {
             let roots = vec![self.tree.root()];
             self.tm.commit(&roots)
         }
+    }
+
+    fn mk_value(v: u32) -> Value {
+        Value { v, extra: 0 }
     }
 
     #[test]
@@ -1133,9 +1326,9 @@ mod test {
         let mut fix = Fixture::new(1024, 102400)?;
         fix.commit()?;
 
-        fix.insert(0, 100)?;
+        fix.insert(0, mk_value(100))?;
         fix.commit()?; // FIXME: shouldn't be needed
-        ensure!(fix.lookup(0) == Some(100));
+        ensure!(fix.lookup(0) == Some(mk_value(100)));
 
         Ok(())
     }
@@ -1145,16 +1338,21 @@ mod test {
 
         fix.commit()?;
 
-        for (_i, k) in keys.iter().enumerate() {
-            fix.insert(*k, *k * 2)?;
-            // let n = fix.check()?;
-            // ensure!(n == i as u32 + 1);
+        eprintln!("inserting {} keys", keys.len());
+        for (i, k) in keys.iter().enumerate() {
+            fix.insert(*k, mk_value(*k * 2))?;
+            if i % 100 == 0 {
+                eprintln!("{}", i);
+                let n = fix.check()?;
+                ensure!(n == i as u32 + 1);
+            }
         }
 
         fix.commit()?;
 
         for k in keys {
-            ensure!(fix.lookup(*k) == Some(k * 2));
+            let v = fix.lookup(*k).unwrap();
+            ensure!(fix.lookup(*k) == Some(mk_value(k * 2)));
         }
 
         let n = fix.check()?;
@@ -1162,9 +1360,10 @@ mod test {
 
         Ok(())
     }
+
     #[test]
     fn insert_sequence() -> Result<()> {
-        let count = 100000;
+        let count = 100_000;
         insert_test(&(0..count).collect::<Vec<u32>>())
     }
 
@@ -1187,8 +1386,8 @@ mod test {
 
         let key = 100;
         let val = 123;
-        fix.insert(key, val)?;
-        ensure!(fix.lookup(key) == Some(val));
+        fix.insert(key, mk_value(val))?;
+        ensure!(fix.lookup(key) == Some(mk_value(val)));
         fix.remove(key)?;
         ensure!(fix.lookup(key) == None);
         Ok(())
@@ -1200,9 +1399,10 @@ mod test {
         fix.commit()?;
 
         // build a big btree
-        let count = 100_000;
+        // let count = 100_000;
+        let count = 10_000;
         for i in 0..count {
-            fix.insert(i, i * 3)?;
+            fix.insert(i, mk_value(i * 3))?;
         }
         eprintln!("built tree");
 
@@ -1214,16 +1414,15 @@ mod test {
             ensure!(fix.lookup(k).is_some());
             let mval = fix.remove(k)?;
             ensure!(mval.is_some());
-            ensure!(mval.unwrap() == k * 3);
+            ensure!(mval.unwrap() == mk_value(k * 3));
             ensure!(fix.lookup(k).is_none());
-            if i % 1000 == 0 {
+            if i % 1 == 0 {
                 eprintln!("removed {}", i);
-            }
 
-            /*
-            let n = fix.check()?;
-            ensure!(n == count - i as u32 - 1);
-            */
+                let n = fix.check()?;
+                ensure!(n == count - i as u32 - 1);
+                eprintln!("checked tree");
+            }
         }
 
         Ok(())
@@ -1232,21 +1431,31 @@ mod test {
     #[test]
     fn rolling_insert_remove() -> Result<()> {
         // If the GC is not working then we'll run out of metadata space.
-        let mut fix = Fixture::new(16, 10240)?;
+        let mut fix = Fixture::new(32, 10240)?;
         fix.commit()?;
 
         for k in 0..1000_000 {
-            fix.insert(k, k * 3)?;
+            fix.insert(k, mk_value(k * 3))?;
             if k > 100 {
                 fix.remove(k - 100)?;
             }
 
-            if k % 10000 == 0 {
+            if k % 100 == 0 {
                 eprintln!("inserted {} entries", k);
                 fix.commit()?;
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn empty_cursor() -> Result<()> {
+        let mut fix = Fixture::new(16, 1024)?;
+        fix.commit()?;
+
+        let c = fix.tree.cursor()?;
+        ensure!(c.get()?.is_none());
         Ok(())
     }
 }

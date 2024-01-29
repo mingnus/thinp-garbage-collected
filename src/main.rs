@@ -4,8 +4,8 @@ use thinp::io_engine::*;
 
 use thinp_garbage_collected::block_allocator::*;
 use thinp_garbage_collected::block_cache::*;
-use thinp_garbage_collected::btree::*;
 use thinp_garbage_collected::core::*;
+use thinp_garbage_collected::mtree::*;
 use thinp_garbage_collected::transaction_manager::*;
 
 fn main() -> Result<()> {
@@ -13,8 +13,8 @@ fn main() -> Result<()> {
     let cache = Arc::new(MetadataCache::new(engine, 16)?);
     let allocator = Arc::new(Mutex::new(BlockAllocator::new(cache.clone(), 100)?));
     let tm = Arc::new(TransactionManager::new(allocator, cache));
-    let tree = BTree::empty_tree(tm)?;
+    let mappings = MTree::empty_tree(tm)?;
 
-    println!("created empty tree at {}", tree.root());
+    println!("created empty tree at {}", mappings.root());
     Ok(())
 }

@@ -70,8 +70,14 @@ impl<S: Serializable, Data: Readable> PArray<S, Data> {
         self.nr_entries
     }
 
+    /// Check the index is less than the current nr of entries
     pub fn check_idx(&self, idx: usize) {
         assert!(idx < self.nr_entries);
+    }
+
+    /// Check that the index is less than the max nr of entries
+    pub fn check_max(&self, idx: usize) {
+        assert!(idx < self.max_entries);
     }
 
     pub fn get(&self, idx: usize) -> S {
@@ -140,6 +146,7 @@ impl<S: Serializable, Data: Writeable> PArray<S, Data> {
     }
 
     pub fn insert_at(&mut self, idx: usize, value: &S) {
+        self.check_max(idx);
         if idx < self.nr_entries {
             self.data.rw().copy_within(
                 Self::byte(idx)..Self::byte(self.nr_entries),
@@ -151,6 +158,7 @@ impl<S: Serializable, Data: Writeable> PArray<S, Data> {
     }
 
     pub fn remove_at(&mut self, idx: usize) {
+        self.check_idx(idx);
         if idx < self.nr_entries - 1 {
             self.data.rw().copy_within(
                 Self::byte(idx + 1)..Self::byte(self.nr_entries),

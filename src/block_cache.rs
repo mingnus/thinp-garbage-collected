@@ -13,6 +13,8 @@ use crate::byte_types::*;
 
 //-------------------------------------------------------------------------
 
+pub type MetadataBlock = u32;
+
 #[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Kind(pub u32);
 

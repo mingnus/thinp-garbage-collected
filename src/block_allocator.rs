@@ -101,6 +101,7 @@ impl BlockAllocator {
     }
 
     pub fn gc(&mut self) -> Result<()> {
+        eprintln!("starting gc");
         let mut state = self.gc_begin()?;
 
         loop {
@@ -112,6 +113,8 @@ impl BlockAllocator {
 
         self.allocated_metadata = state.seen_metadata;
         self.allocated_data = state.seen_data;
+        eprintln!("completed gc");
+
         Ok(())
     }
 

@@ -92,6 +92,7 @@ impl TransactionManager_ {
         if self.shadows.contains(&old_loc) {
             Ok(self.cache.write_lock(old_loc, kind)?)
         } else if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata()? {
+            eprintln!("shadowing {}", old_loc);
             let old = self.cache.read_lock(old_loc, kind)?;
             let mut new = self.cache.zero_lock(loc, kind)?;
             self.shadows.insert(loc);

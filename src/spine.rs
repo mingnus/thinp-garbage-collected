@@ -31,7 +31,8 @@ impl Spine {
         self.new_root
     }
 
-    pub fn top(&self) -> bool {
+    /// True if there is no parent node
+    pub fn is_top(&self) -> bool {
         self.parent.is_none()
     }
 
@@ -72,6 +73,10 @@ impl Spine {
 
     pub fn child(&self) -> WriteProxy {
         self.child.clone()
+    }
+
+    pub fn child_loc(&self) -> MetadataBlock {
+        self.child.loc()
     }
 
     pub fn parent(&self) -> WriteProxy {
