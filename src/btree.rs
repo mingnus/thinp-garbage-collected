@@ -904,7 +904,7 @@ struct Frame {
     nr_entries: usize,
 }
 
-pub struct Iterator<'a, V: Serializable> {
+pub struct Cursor<'a, V: Serializable> {
     tree: &'a BTree<V>,
 
     // Holds pairs of (loc, index, nr_entries)
@@ -922,19 +922,17 @@ fn next_<TreeV: Serializable, NV: Serializable>(
     let frame = stack.last_mut().unwrap();
 
     frame.index += 1;
-    if frame.index == frame.nr_entries {
+    if frame.index >= frame.nr_entries {
         // We need to move to the next node.
         stack.pop();
-        next_::<TreeV, MetadataBlock>(tree, stack)?;
+        if !next_::<TreeV, MetadataBlock>(tree, stack)? {
+            return Ok(false);
+        }
 
         let frame = stack.last().unwrap();
         let n = tree.read_node::<MetadataBlock>(frame.loc)?;
 
-        if n.nr_entries.get() == 0 {
-            return Ok(false);
-        }
-
-        let loc = n.values.get(0);
+        let loc = n.values.get(frame.index);
         let n = tree.read_node::<NV>(loc)?;
 
         stack.push(Frame {
@@ -947,8 +945,8 @@ fn next_<TreeV: Serializable, NV: Serializable>(
     Ok(true)
 }
 
-impl<'a, V: Serializable> Iterator<'a, V> {
-    fn new(tree: &'a BTree<V>) -> Result<Self> {
+impl<'a, V: Serializable> Cursor<'a, V> {
+    fn new(tree: &'a BTree<V>, key: u32) -> Result<Self> {
         let mut stack = Vec::new();
         let mut loc = tree.root();
 
@@ -957,12 +955,18 @@ impl<'a, V: Serializable> Iterator<'a, V> {
                 let n = tree.read_node::<V>(loc)?;
                 let nr_entries = n.nr_entries.get() as usize;
                 if nr_entries == 0 {
+                    eprintln!("empty cursor");
                     return Ok(Self { tree, stack: None });
+                }
+
+                let mut idx = n.keys.bsearch(&key);
+                if idx < 0 {
+                    idx = 0;
                 }
 
                 stack.push(Frame {
                     loc,
-                    index: 0,
+                    index: idx as usize,
                     nr_entries,
                 });
 
@@ -974,14 +978,19 @@ impl<'a, V: Serializable> Iterator<'a, V> {
                 let n = tree.read_node::<MetadataBlock>(loc)?;
                 let nr_entries = n.nr_entries.get() as usize;
 
+                let mut idx = n.keys.bsearch(&key);
+                if idx < 0 {
+                    idx = 0;
+                }
+
                 // we cannot have an internal node without entries
                 stack.push(Frame {
                     loc,
-                    index: 0,
+                    index: idx as usize,
                     nr_entries,
                 });
 
-                loc = n.values.get(0);
+                loc = n.values.get(idx as usize);
             }
         }
     }
@@ -1045,8 +1054,8 @@ impl<V: Serializable> BTree<V> {
         self.root
     }
 
-    pub fn cursor(&self) -> Result<Iterator<V>> {
-        Iterator::new(self)
+    pub fn cursor(&self, key: u32) -> Result<Cursor<V>> {
+        Cursor::new(self, key)
     }
 
     fn is_leaf(&self, loc: MetadataBlock) -> Result<bool> {
@@ -1454,8 +1463,39 @@ mod test {
         let mut fix = Fixture::new(16, 1024)?;
         fix.commit()?;
 
-        let c = fix.tree.cursor()?;
+        let c = fix.tree.cursor(0)?;
         ensure!(c.get()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn populated_cursor() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+
+        // build a big btree
+        // let count = 100_000;
+        let count = 1000;
+        for i in 0..count {
+            fix.insert(i * 3, mk_value(i * 3))?;
+        }
+        eprintln!("built tree");
+
+        let first_key = 601;
+        let mut c = fix.tree.cursor(first_key)?;
+
+        let mut expected_key = (first_key / 3) * 3;
+        loop {
+            let (k, _v) = c.get()?.unwrap();
+            ensure!(k == expected_key);
+            expected_key += 3;
+
+            if !c.next()? {
+                ensure!(expected_key == count * 3);
+                break;
+            }
+        }
+
         Ok(())
     }
 }
