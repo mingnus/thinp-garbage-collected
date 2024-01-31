@@ -25,7 +25,7 @@ const SUPERBLOCK_LOC: u32 = 0;
 
 impl TransactionManager_ {
     fn new(allocator: Arc<Mutex<BlockAllocator>>, cache: Arc<MetadataCache>) -> Self {
-        let superblock = cache.write_lock(SUPERBLOCK_LOC, &SUPERBLOCK_KIND).unwrap();
+        let superblock = cache.zero_lock(SUPERBLOCK_LOC, &SUPERBLOCK_KIND).unwrap();
         Self {
             allocator,
             cache,
