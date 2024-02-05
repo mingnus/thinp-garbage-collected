@@ -407,9 +407,9 @@ impl MetadataCacheInner {
         if let Some(entry) = self.cache.get_mut(&loc).cloned() {
             if entry.write_lock() {
                 let inner = entry.inner.lock().unwrap();
-                let mut data = inner.block.get_data();
+                let data = inner.block.get_data();
                 unsafe {
-                    std::ptr::write_bytes(&mut data, 0, BLOCK_SIZE);
+                    std::ptr::write_bytes(data.as_mut_ptr(), 0, BLOCK_SIZE);
                 }
                 self.remove_lru_(loc);
                 Ok(Locked(entry.clone()))
@@ -835,6 +835,19 @@ mod test {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_zerolock_cached_block() -> Result<()> {
+        let engine = mk_engine(16);
+        let cache = Arc::new(MetadataCache::new(engine.clone(), 16)?);
+        {
+            cache.zero_lock(0, &Kind(17))?;
+        }
+        {
+            cache.zero_lock(0, &Kind(17))?;
+        }
         Ok(())
     }
 }
