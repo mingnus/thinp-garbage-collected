@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{anyhow, ensure, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::{BTreeSet, VecDeque};
 use std::io::Write;
@@ -549,6 +549,63 @@ mod insert_utils {
                         child.nr_entries.inc(1);
                     }
                 }
+
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn overwrite<V: Serializable>(
+        spine: &mut Spine,
+        old_key: u32,
+        new_key: u32,
+        value: &V,
+    ) -> Result<()> {
+        let mut idx = 0isize;
+
+        loop {
+            let flags = read_flags(&mut spine.child().r())?;
+
+            if flags == BTreeFlags::Internal {
+                let mut child = w_node::<u32>(spine.child());
+
+                idx = child.keys.bsearch(&new_key);
+                if idx < 0 {
+                    // adjust the keys as we go down the spine.
+                    child.keys.set(0, &new_key);
+                    idx = 0;
+                }
+
+                spine.push(child.values.get(idx as usize))?;
+
+                // Patch up the parent
+                let loc = spine.child().loc();
+                let mut p = w_node::<u32>(spine.parent());
+                p.values.set(idx as usize, &loc);
+            } else {
+                let mut child = w_node::<V>(spine.child());
+
+                idx = child.keys.bsearch(&old_key);
+
+                #[cfg(debug_assertions)]
+                {
+                    if idx > 0 {
+                        ensure!(child.keys.get(idx as usize - 1) < new_key);
+                    }
+
+                    if (idx as usize) < child.keys.len() - 1 {
+                        ensure!(child.keys.get(idx as usize + 1) > new_key);
+                    }
+                }
+
+                if child.keys.get(idx as usize) != old_key {
+                    return Err(anyhow!("missing key in call to overwrite"));
+                }
+
+                child.keys.set(idx as usize, &new_key);
+                child.values.set(idx as usize, value);
 
                 break;
             }
@@ -1107,6 +1164,16 @@ impl<V: Serializable> BTree<V> {
         }
     }
 
+    /// Optimisation for a paired remove/insert.  Avoids having to ensure space
+    /// or rebalance.  Fails if the old_key is not present, or if the new_key doesn't
+    /// fit in the old one's location.
+    pub fn overwrite(&mut self, old_key: u32, new_key: u32, value: &V) -> Result<()> {
+        let mut spine = Spine::new(self.tm.clone(), self.root)?;
+        insert_utils::overwrite(&mut spine, old_key, new_key, value)?;
+        self.root = spine.get_root();
+        Ok(())
+    }
+
     pub fn insert(&mut self, key: u32, value: &V) -> Result<()> {
         let mut spine = Spine::new(self.tm.clone(), self.root)?;
         insert_utils::insert(&mut spine, key, value)?;
@@ -1293,8 +1360,12 @@ mod test {
             self.tree.lookup(key).unwrap()
         }
 
-        fn insert(&mut self, key: u32, value: Value) -> Result<()> {
-            self.tree.insert(key, &value)
+        fn insert(&mut self, key: u32, value: &Value) -> Result<()> {
+            self.tree.insert(key, value)
+        }
+
+        fn overwrite(&mut self, old_key: u32, new_key: u32, value: &Value) -> Result<()> {
+            self.tree.overwrite(old_key, new_key, value)
         }
 
         fn remove(&mut self, key: u32) -> Result<Option<Value>> {
@@ -1335,21 +1406,17 @@ mod test {
         let mut fix = Fixture::new(1024, 102400)?;
         fix.commit()?;
 
-        fix.insert(0, mk_value(100))?;
+        fix.insert(0, &mk_value(100))?;
         fix.commit()?; // FIXME: shouldn't be needed
         ensure!(fix.lookup(0) == Some(mk_value(100)));
 
         Ok(())
     }
 
-    fn insert_test(keys: &[u32]) -> Result<()> {
-        let mut fix = Fixture::new(1024, 102400)?;
-
-        fix.commit()?;
-
+    fn insert_test_(fix: &mut Fixture, keys: &[u32]) -> Result<()> {
         eprintln!("inserting {} keys", keys.len());
         for (i, k) in keys.iter().enumerate() {
-            fix.insert(*k, mk_value(*k * 2))?;
+            fix.insert(*k, &mk_value(*k * 2))?;
             if i % 100 == 0 {
                 eprintln!("{}", i);
                 let n = fix.check()?;
@@ -1368,6 +1435,12 @@ mod test {
         ensure!(n == keys.len() as u32);
 
         Ok(())
+    }
+
+    fn insert_test(keys: &[u32]) -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+        insert_test_(&mut fix, keys)
     }
 
     #[test]
@@ -1389,13 +1462,72 @@ mod test {
     }
 
     #[test]
+    fn overwrite_single() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+
+        fix.insert(0, &mk_value(100))?;
+        fix.commit()?; // FIXME: shouldn't be needed
+        ensure!(fix.lookup(0) == Some(mk_value(100)));
+
+        fix.overwrite(0, 100, &mk_value(123))?;
+        ensure!(fix.lookup(0) == None);
+        ensure!(fix.lookup(100) == Some(mk_value(123)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_many() -> Result<()> {
+        let count = 100_000;
+        let keys: Vec<u32> = (0..count).map(|n| n * 3).collect();
+
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+        insert_test_(&mut fix, &keys)?;
+
+        // Overwrite all keys
+        for (i, k) in keys.iter().enumerate() {
+            fix.overwrite(*k, *k + 1, &mk_value(*k * 3))?;
+            if i % 100 == 0 {
+                eprintln!("{}", i);
+                let n = fix.check()?;
+                ensure!(n == count);
+            }
+        }
+
+        // Verify
+        for k in keys {
+            ensure!(fix.lookup(k) == None);
+            ensure!(fix.lookup(k + 1) == Some(mk_value(k * 3)));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn overwrite_bad_key() -> Result<()> {
+        let keys: Vec<u32> = (0..10).map(|n| n * 3).collect();
+
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+        insert_test_(&mut fix, &keys)?;
+
+        ensure!(fix.overwrite(0, 10, &mk_value(100)).is_err());
+        ensure!(fix.overwrite(9, 0, &mk_value(100)).is_err());
+
+        Ok(())
+    }
+
+    #[test]
     fn remove_single() -> Result<()> {
         let mut fix = Fixture::new(1024, 102400)?;
         fix.commit()?;
 
         let key = 100;
         let val = 123;
-        fix.insert(key, mk_value(val))?;
+        fix.insert(key, &mk_value(val))?;
         ensure!(fix.lookup(key) == Some(mk_value(val)));
         fix.remove(key)?;
         ensure!(fix.lookup(key) == None);
@@ -1411,7 +1543,7 @@ mod test {
         // let count = 100_000;
         let count = 10_000;
         for i in 0..count {
-            fix.insert(i, mk_value(i * 3))?;
+            fix.insert(i, &mk_value(i * 3))?;
         }
         eprintln!("built tree");
 
@@ -1444,7 +1576,7 @@ mod test {
         fix.commit()?;
 
         for k in 0..1000_000 {
-            fix.insert(k, mk_value(k * 3))?;
+            fix.insert(k, &mk_value(k * 3))?;
             if k > 100 {
                 fix.remove(k - 100)?;
             }
@@ -1477,7 +1609,7 @@ mod test {
         // let count = 100_000;
         let count = 1000;
         for i in 0..count {
-            fix.insert(i * 3, mk_value(i * 3))?;
+            fix.insert(i * 3, &mk_value(i * 3))?;
         }
         eprintln!("built tree");
 
