@@ -111,6 +111,20 @@ operation is known as 'shadowing'.
 
 A per block rw lock is used to protect the block from concurrent access.
 
+A shadow is a copy of a metadata block.  To minimise copying we
+try and only copy a block only once within each transaction.
+   
+There is a corner case we need to be careful of though; if a
+shadowed block has the number of times it is referenced increased, since
+is was shadowed, but within this transaction, then we need to force another
+copy to be made.  But we don't track the reference counts, so we make the
+call on whether to copy based on both the parent and the block to be copied.
+If None is passed for the old_parent then we always copy.
+    
+Note: I initially thought we could have a 'inc_ref()' method that just removes
+a block from the shadow set.  But this won't work because we need to start
+calling inc_ref() for children blocks if we ever shadow that block.
+
 ### Interface:
 
 - new metadata block; allocates and zeroes a new block.  Returns read reference.  Allocations

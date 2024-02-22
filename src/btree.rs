@@ -947,6 +947,7 @@ mod remove_utilities {
 
 pub struct BTree<V: Serializable> {
     tm: Arc<TransactionManager>,
+    context: ReferenceContext,
     root: u32,
     phantom: std::marker::PhantomData<V>,
 }
@@ -1031,24 +1032,24 @@ impl<'a, V: Serializable> Cursor<'a, V> {
                     tree,
                     stack: Some(stack),
                 });
-            } else {
-                let n = tree.read_node::<MetadataBlock>(loc)?;
-                let nr_entries = n.nr_entries.get() as usize;
-
-                let mut idx = n.keys.bsearch(&key);
-                if idx < 0 {
-                    idx = 0;
-                }
-
-                // we cannot have an internal node without entries
-                stack.push(Frame {
-                    loc,
-                    index: idx as usize,
-                    nr_entries,
-                });
-
-                loc = n.values.get(idx as usize);
             }
+
+            let n = tree.read_node::<MetadataBlock>(loc)?;
+            let nr_entries = n.nr_entries.get() as usize;
+
+            let mut idx = n.keys.bsearch(&key);
+            if idx < 0 {
+                idx = 0;
+            }
+
+            // we cannot have an internal node without entries
+            stack.push(Frame {
+                loc,
+                index: idx as usize,
+                nr_entries,
+            });
+
+            loc = n.values.get(idx as usize);
         }
     }
 
@@ -1085,23 +1086,25 @@ impl<'a, V: Serializable> Cursor<'a, V> {
 }
 
 impl<V: Serializable> BTree<V> {
-    pub fn open_tree(tm: Arc<TransactionManager>, root: u32) -> Self {
+    pub fn open_tree(tm: Arc<TransactionManager>, context: ReferenceContext, root: u32) -> Self {
         Self {
             tm,
+            context,
             root,
             phantom: std::marker::PhantomData,
         }
     }
 
-    pub fn empty_tree(tm: Arc<TransactionManager>) -> Result<Self> {
+    pub fn empty_tree(tm: Arc<TransactionManager>, context: ReferenceContext) -> Result<Self> {
         let root = {
-            let root = tm.new_block(&BNODE_KIND)?;
+            let root = tm.new_block(context, &BNODE_KIND)?;
             let root = init_node::<V>(root, true)?;
             root.loc
         };
 
         Ok(Self {
             tm,
+            context,
             root,
             phantom: std::marker::PhantomData,
         })
@@ -1164,25 +1167,29 @@ impl<V: Serializable> BTree<V> {
         }
     }
 
+    fn mk_spine(&self) -> Result<Spine> {
+        Spine::new(self.tm.clone(), self.context, self.root)
+    }
+
     /// Optimisation for a paired remove/insert.  Avoids having to ensure space
     /// or rebalance.  Fails if the old_key is not present, or if the new_key doesn't
     /// fit in the old one's location.
     pub fn overwrite(&mut self, old_key: u32, new_key: u32, value: &V) -> Result<()> {
-        let mut spine = Spine::new(self.tm.clone(), self.root)?;
+        let mut spine = self.mk_spine()?;
         insert_utils::overwrite(&mut spine, old_key, new_key, value)?;
         self.root = spine.get_root();
         Ok(())
     }
 
     pub fn insert(&mut self, key: u32, value: &V) -> Result<()> {
-        let mut spine = Spine::new(self.tm.clone(), self.root)?;
+        let mut spine = self.mk_spine()?;
         insert_utils::insert(&mut spine, key, value)?;
         self.root = spine.get_root();
         Ok(())
     }
 
     pub fn remove(&mut self, key: u32) -> Result<Option<V>> {
-        let mut spine = Spine::new(self.tm.clone(), self.root)?;
+        let mut spine = self.mk_spine()?;
         let r = remove_utilities::remove(&mut spine, key)?;
         self.root = spine.get_root();
         Ok(r)
@@ -1341,7 +1348,7 @@ mod test {
             let cache = Arc::new(MetadataCache::new(engine.clone(), 16)?);
             let allocator = mk_allocator(cache.clone(), nr_data_blocks)?;
             let tm = Arc::new(TransactionManager::new(allocator.clone(), cache.clone()));
-            let tree = BTree::empty_tree(tm.clone())?;
+            let tree = BTree::empty_tree(tm.clone(), ReferenceContext::Force)?;
 
             Ok(Self {
                 engine,
@@ -1557,7 +1564,7 @@ mod test {
             ensure!(mval.is_some());
             ensure!(mval.unwrap() == mk_value(k * 3));
             ensure!(fix.lookup(k).is_none());
-            if i % 1 == 0 {
+            if i % 100 == 0 {
                 eprintln!("removed {}", i);
 
                 let n = fix.check()?;
@@ -1575,7 +1582,7 @@ mod test {
         let mut fix = Fixture::new(32, 10240)?;
         fix.commit()?;
 
-        for k in 0..1000_000 {
+        for k in 0..1_000_000 {
             fix.insert(k, &mk_value(k * 3))?;
             if k > 100 {
                 fix.remove(k - 100)?;

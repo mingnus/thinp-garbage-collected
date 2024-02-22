@@ -11,13 +11,14 @@ use crate::transaction_manager::*;
 
 pub struct MTree {
     tm: Arc<TransactionManager>,
+    context: ReferenceContext,
     index: Index,
 }
 
 impl MTree {
-    pub fn empty_tree(tm: Arc<TransactionManager>) -> Result<Self> {
+    pub fn empty_tree(tm: Arc<TransactionManager>, context: ReferenceContext) -> Result<Self> {
         let index = Index::new();
-        Ok(Self { tm, index })
+        Ok(Self { tm, context, index })
     }
 
     pub fn root(&self) -> u32 {
@@ -58,7 +59,7 @@ impl MTree {
         let mut results = Vec::new();
 
         for info in infos {
-            let b = self.tm.shadow(info.loc, &MNODE_KIND)?;
+            let b = self.tm.shadow(self.context, info.loc, &MNODE_KIND)?;
             let mut n = w_node(b);
 
             remove_range(&mut n, kbegin, kend);
@@ -82,10 +83,10 @@ impl MTree {
         let mut results = Vec::new();
 
         if left.nr_entries + right.nr_entries < MAX_ENTRIES as u32 {
-            let lb = self.tm.shadow(left.loc, &MNODE_KIND)?;
+            let lb = self.tm.shadow(self.context, left.loc, &MNODE_KIND)?;
             let loc = lb.loc();
             let mut ln = w_node(lb);
-            let mut rn = w_node(self.tm.shadow(right.loc, &MNODE_KIND)?);
+            let mut rn = w_node(self.tm.shadow(self.context, right.loc, &MNODE_KIND)?);
             let (keys, mappings) = rn.shift_left(right.nr_entries as usize);
             ln.append(&keys, &mappings);
             results.push(BlockInfo {
@@ -127,7 +128,7 @@ impl MTree {
     }
 
     fn alloc_node(&mut self) -> Result<WNode> {
-        let b = self.tm.new_block(&MNODE_KIND)?;
+        let b = self.tm.new_block(self.context, &MNODE_KIND)?;
         init_node(b)
     }
 
@@ -164,7 +165,7 @@ impl MTree {
             }
             InfoResult::Update(_info_idx, mut info) => {
                 eprintln!("non empty branch");
-                let left = self.tm.shadow(info.loc, &MNODE_KIND)?;
+                let left = self.tm.shadow(self.context, info.loc, &MNODE_KIND)?;
                 let mut left_n = w_node(left);
                 let nr_entries = left_n.nr_entries.get();
 
@@ -176,7 +177,7 @@ impl MTree {
                     eprintln!("splitting");
                     // FIXME: factor out
 
-                    let right = self.tm.new_block(&MNODE_KIND)?;
+                    let right = self.tm.new_block(self.context, &MNODE_KIND)?;
                     let mut right_n = w_node(right);
                     let nr_right = nr_entries / 2;
 
@@ -237,6 +238,8 @@ mod mtree {
     use std::sync::{Arc, Mutex};
     use thinp::io_engine::*;
 
+    use ReferenceContext::*;
+
     fn mk_engine(nr_blocks: u32) -> Arc<dyn IoEngine> {
         Arc::new(CoreIoEngine::new(nr_blocks as u64))
     }
@@ -266,7 +269,7 @@ mod mtree {
             let cache = Arc::new(MetadataCache::new(engine.clone(), 16)?);
             let allocator = mk_allocator(cache.clone(), nr_data_blocks)?;
             let tm = Arc::new(TransactionManager::new(allocator.clone(), cache.clone()));
-            let tree = MTree::empty_tree(tm.clone())?;
+            let tree = MTree::empty_tree(tm.clone(), Force)?;
 
             Ok(Self {
                 engine,

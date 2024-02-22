@@ -494,7 +494,7 @@ impl Readable for ReadProxy {
 
 #[derive(Clone)]
 pub struct WriteProxy_ {
-    pub loc: u32,
+    pub loc: MetadataBlock,
     cache: Arc<MetadataCache>,
     entry: Arc<CacheEntry>,
 }
@@ -513,7 +513,7 @@ pub struct WriteProxy {
 }
 
 impl WriteProxy {
-    pub fn loc(&self) -> u32 {
+    pub fn loc(&self) -> MetadataBlock {
         self.proxy.loc
     }
 }

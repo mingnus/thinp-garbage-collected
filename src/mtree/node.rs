@@ -378,6 +378,8 @@ mod node {
     use std::sync::{Arc, Mutex};
     use thinp::io_engine::*;
 
+    use ReferenceContext::*;
+
     fn mk_engine(nr_blocks: u32) -> Arc<dyn IoEngine> {
         Arc::new(CoreIoEngine::new(nr_blocks as u64))
     }
@@ -419,7 +421,7 @@ mod node {
     #[test]
     fn empty() -> Result<()> {
         let fix = Fixture::new(1024, 1024)?;
-        let b = fix.tm.new_block(&MNODE_KIND)?;
+        let b = fix.tm.new_block(Force, &MNODE_KIND)?;
         let n = Node::new(b.loc(), b);
         ensure!(n.nr_entries.get() == 0);
 
@@ -429,7 +431,7 @@ mod node {
     #[test]
     fn insert() -> Result<()> {
         let fix = Fixture::new(1024, 1024)?;
-        let b = fix.tm.new_block(&MNODE_KIND)?;
+        let b = fix.tm.new_block(Force, &MNODE_KIND)?;
         let mut n = Node::new(b.loc(), b);
 
         let pairs = [
@@ -466,7 +468,7 @@ mod node {
     #[test]
     fn insert_when_full() -> Result<()> {
         let fix = Fixture::new(1024, 1024)?;
-        let b = fix.tm.new_block(&MNODE_KIND)?;
+        let b = fix.tm.new_block(Force, &MNODE_KIND)?;
         let mut n = Node::new(b.loc(), b);
 
         for i in 0..MAX_ENTRIES {

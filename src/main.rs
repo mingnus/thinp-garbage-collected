@@ -18,7 +18,7 @@ fn main() -> Result<()> {
         SUPERBLOCK_LOCATION,
     )?));
     let tm = Arc::new(TransactionManager::new(allocator, cache));
-    let mappings = MTree::empty_tree(tm)?;
+    let mappings = MTree::empty_tree(tm, ReferenceContext::ThinId(0))?;
 
     println!("created empty tree at {}", mappings.root());
     Ok(())
