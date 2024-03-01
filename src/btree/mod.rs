@@ -1,2 +1,3 @@
-pub mod btree;
+pub mod btree; // FIXME: move into this file
+mod insert;
 mod node;
