@@ -1,13 +1,23 @@
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use std::sync::Arc;
 
+use crate::block_cache::MetadataBlock;
 use crate::block_kinds::*;
 use crate::byte_types::*;
+use crate::mtree::diff::*;
 use crate::mtree::index::*;
 use crate::mtree::node::*;
 use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockInfo {
+    pub loc: u32,
+    pub nr_entries: u32,
+    pub kbegin: u32,
+    pub kend: u32,
+}
 
 pub struct MTree {
     tm: Arc<TransactionManager>,
@@ -17,7 +27,7 @@ pub struct MTree {
 
 impl MTree {
     pub fn empty_tree(tm: Arc<TransactionManager>, context: ReferenceContext) -> Result<Self> {
-        let index = Index::new();
+        let index = Index::new(tm.clone(), context)?;
         Ok(Self { tm, context, index })
     }
 
@@ -25,19 +35,20 @@ impl MTree {
         self.index.root()
     }
 
+    /// Lookup mappings in the range [kbegin, kend)
+    /// FIXME: should we return an interator?
     pub fn lookup(&self, kbegin: u32, kend: u32) -> Result<Vec<(u32, Mapping)>> {
-        let infos = self.index.lookup(kbegin, kend)?;
+        let locs = self.index.lookup(kbegin, kend)?;
 
         let mut results = Vec::new();
 
         let mut first = true;
-        for info in infos {
-            let b = self.tm.read(info.loc, &MNODE_KIND)?;
+        for (_, loc) in &locs {
+            let b = self.tm.read(*loc, &MNODE_KIND)?;
             let n = r_node(b);
 
             if first {
                 first = false;
-                eprintln!("nr entries = {}", n.keys.len());
                 let mut m_idx = n.keys.bsearch(&kbegin);
 
                 if m_idx < 0 {
@@ -53,78 +64,125 @@ impl MTree {
         Ok(results)
     }
 
-    // FIXME: this also modifies the underlying nodes.  Rename.
-    fn trim_infos(&self, infos: &[BlockInfo], kbegin: u32, kend: u32) -> Result<Vec<BlockInfo>> {
-        eprintln!("trim_infos");
+    // Get the key ranges for the given nodes.  This only estimates based on the
+    // keys in the nodes.  Other than the final node, it doesn't read the node contents.
+    fn get_ranges(&self, kvs: &[KeyValue]) -> Result<Vec<(u32, u32)>> {
         let mut results = Vec::new();
 
-        for info in infos {
-            let b = self.tm.shadow(self.context, info.loc, &MNODE_KIND)?;
+        if kvs.is_empty() {
+            return Ok(results);
+        }
+
+        for i in 0..kvs.len() - 1 {
+            let begin = kvs[i].0;
+            let end = kvs[i + 1].0;
+            results.push((begin, end));
+        }
+
+        // We need to read the last node to get the last key
+        let (last_key, last_loc) = kvs.last().unwrap();
+        let b = self.tm.read(*last_loc, &MNODE_KIND)?;
+        let n = r_node(b);
+        if let Some(end) = n.last_key() {
+            results.push((*last_key, end));
+        }
+
+        Ok(results)
+    }
+
+    /// Remove mappings in the range [kbegin, kend), returns the new set of nodes.
+    fn remove_(&self, kvs: &[KeyValue], kbegin: u32, kend: u32) -> Result<Vec<KeyValue>> {
+        let mut results = Vec::new();
+        let ranges = self.get_ranges(kvs)?;
+
+        for i in 0..ranges.len() {
+            let r = ranges[i];
+            if r.0 >= kbegin && r.1 <= kend {
+                // The entire node is within the range
+                continue;
+            }
+
+            if r.1 <= kbegin || r.0 >= kend {
+                // The node is entirely outside the range
+                results.push(kvs[i]);
+                continue;
+            }
+
+            // Shadow the node and remove the range
+            let b = self.tm.shadow(self.context, kvs[i].1, &MNODE_KIND)?;
             let mut n = w_node(b);
 
             remove_range(&mut n, kbegin, kend);
 
-            let nr_entries = n.nr_entries.get();
-            if nr_entries > 0 {
-                let idx = nr_entries as usize - 1;
-                results.push(BlockInfo {
-                    loc: n.loc,
-                    nr_entries,
-                    kbegin: n.keys.get(0),
-                    kend: n.keys.get(idx) + n.mappings.get(idx).len as u32,
-                })
+            if n.nr_entries.get() > 0 {
+                results.push((n.keys.get(0), n.loc));
             }
         }
 
         Ok(results)
     }
 
-    fn coalesce_infos(&self, left: &BlockInfo, right: &BlockInfo) -> Result<Vec<BlockInfo>> {
+    /// Returns the number of entries in the node at the given location
+    fn nr_in_node(&self, loc: MetadataBlock) -> Result<usize> {
+        let b = self.tm.read(loc, &MNODE_KIND)?;
+        let n = r_node(b);
+        Ok(n.nr_entries.get() as usize)
+    }
+
+    /// Merge two nodes if possible, otherwise return the original nodes.
+    fn merge_nodes(&self, left: KeyValue, right: KeyValue) -> Result<Vec<KeyValue>> {
         let mut results = Vec::new();
 
-        if left.nr_entries + right.nr_entries < MAX_ENTRIES as u32 {
-            let lb = self.tm.shadow(self.context, left.loc, &MNODE_KIND)?;
-            let loc = lb.loc();
+        let nr_left = self.nr_in_node(left.1)?;
+        let nr_right = self.nr_in_node(right.1)?;
+
+        if nr_left + nr_right < MAX_ENTRIES {
+            let lb = self.tm.shadow(self.context, left.1, &MNODE_KIND)?;
             let mut ln = w_node(lb);
-            let mut rn = w_node(self.tm.shadow(self.context, right.loc, &MNODE_KIND)?);
-            let (keys, mappings) = rn.shift_left(right.nr_entries as usize);
+            let mut rn = w_node(self.tm.shadow(self.context, right.1, &MNODE_KIND)?);
+            let (keys, mappings) = rn.shift_left(nr_right);
             ln.append(&keys, &mappings);
-            results.push(BlockInfo {
-                loc,
-                nr_entries: left.nr_entries + right.nr_entries,
-                kbegin: left.kbegin,
-                kend: right.kend,
-            });
+            results.push((ln.keys.get(0), ln.loc));
         } else {
-            results.push(left.clone());
-            results.push(right.clone());
+            results.push(left);
+            results.push(right);
         }
 
         Ok(results)
+    }
+
+    fn apply_edits(&mut self, old: &[KeyValue], new: &[KeyValue]) -> Result<()> {
+        let edits = calc_edits(&old, &new)?;
+        eprintln!("edits = {:?}", edits);
+
+        // FIXME: finish
+        /*
+        for e in edits {
+            match e {
+                Edit::RemoveRange(kbegin, kend) => self.index.remove(kbegin, kend)?,
+                Edit::Insert(kv) => self.index.insert(kv)?,
+            }
+        }
+        */
+
+        Ok(())
     }
 
     pub fn remove(&mut self, kbegin: u32, kend: u32) -> Result<()> {
         eprintln!("remove_range({}, {})", kbegin, kend);
-        let (_idx_begin, infos) = self.index.remove(kbegin, kend)?;
+        let old = self.index.lookup(kbegin, kend)?;
 
-        if infos.is_empty() {
-            eprintln!("no infos");
+        if old.is_empty() {
             return Ok(());
         }
 
-        eprintln!("untrimmed infos: {:?}", infos);
-        let infos = self.trim_infos(&infos, kbegin, kend)?;
-        eprintln!("trimmed infos: {:?}", infos);
+        eprintln!("untrimmed infos: {:?}", old);
+        let new = self.remove_(&old, kbegin, kend)?;
+        eprintln!("trimmed infos: {:?}", new);
 
-        match infos.len() {
-            0 => Ok(()),
-            1 => self.index.insert(&infos),
-            2 => {
-                let infos = self.coalesce_infos(&infos[0], &infos[1])?;
-                self.index.insert(&infos)
-            }
-            _ => panic!("shouldn't be more than 2 nodes"),
-        }
+        self.apply_edits(&old, &new)?;
+
+        Ok(())
     }
 
     fn alloc_node(&mut self) -> Result<WNode> {
@@ -143,83 +201,65 @@ impl MTree {
 
     pub fn insert(&mut self, kbegin: u32, m: &Mapping) -> Result<()> {
         let kend = kbegin + m.len as u32;
+        let old = self.index.lookup_extra(kbegin, kend)?;
+        let mut new = self.remove_(&old, kbegin, kend)?;
 
-        self.remove(kbegin, kend)?;
+        if new.is_empty() {
+            // Create a new node
+            let mut n = self.alloc_node()?;
+            n.insert_at(0, kbegin, *m)?;
+            new.push((n.keys.get(0), n.loc));
+        } else {
+            ensure!(new.len() <= 2);
+            let (_key, loc) = new[0];
 
-        match self.index.info_for_insert(kbegin, kbegin + m.len as u32)? {
-            InfoResult::New(_info_idx) => {
-                eprintln!("empty branch");
-                // Create a new node
-                let mut n = self.alloc_node()?;
-                n.insert_at(0, kbegin, *m)?;
+            let left = self.tm.shadow(self.context, loc, &MNODE_KIND)?;
+            let mut left_n = w_node(left);
+            let nr_entries = left_n.nr_entries.get();
 
-                let info = BlockInfo {
-                    loc: n.loc,
-                    nr_entries: 1,
-                    kbegin,
-                    kend: kbegin + m.len as u32,
-                };
-                let infos = [info];
-                // FIXME: we know where this should be inserted
-                self.index.insert(&infos)?;
+            // Inserting a new mapping can consume 0, 1 or 2 spaces in a node.  We
+            // don't want to split a node unless we absolutely need to.  But we also have
+            // to examine the node quite closely to work out how much space we need.
+            if nr_entries >= MAX_ENTRIES as u32 - 2 {
+                eprintln!("splitting");
+                todo!();
+
+                /*
+                // FIXME: factor out
+
+                let right = self.tm.new_block(&MNODE_KIND)?;
+                let mut right_n = w_node(right);
+                let nr_right = nr_entries / 2;
+
+                let (ks, ms) = left_n.remove_right(nr_right as usize);
+                let r_first_key = ks.get(0).unwrap();
+                right_n.prepend(&ks, &ms);
+
+                new.insert(1, (*r_first_key, right_n.loc));
+                let r_info = Self::info_from_node(&right_n);
+                self.index.insert(&[l_info, r_info])?;
+
+                // FIXME: inefficient
+                // retry from the beginning
+                drop(left_n);
+                drop(right_n);
+                return self.insert(kbegin, m);
+                */
             }
-            InfoResult::Update(_info_idx, mut info) => {
-                eprintln!("non empty branch");
-                let left = self.tm.shadow(self.context, info.loc, &MNODE_KIND)?;
-                let mut left_n = w_node(left);
-                let nr_entries = left_n.nr_entries.get();
 
-                // Inserting a new mapping can consume 0, 1 or 2 spaces in a node.  We
-                // don't want to split a node if we absolutely need to.  But we also have
-                // to examine the node quite closely to work out how much space we need.
+            let idx = left_n.keys.bsearch(&kbegin);
 
-                if nr_entries == MAX_ENTRIES as u32 {
-                    eprintln!("splitting");
-                    // FIXME: factor out
+            // bsearch will have returned the lower bound.  We know there are
+            // no overlapping mappings since we remove the range at the start of
+            // the insert.  So we can just add one to get the required insert
+            // position.
+            let idx = (idx + 1) as usize;
 
-                    let right = self.tm.new_block(self.context, &MNODE_KIND)?;
-                    let mut right_n = w_node(right);
-                    let nr_right = nr_entries / 2;
-
-                    let (ks, ms) = left_n.remove_right(nr_right as usize);
-                    right_n.prepend(&ks, &ms);
-
-                    // Rejig infos
-                    let l_info = Self::info_from_node(&left_n);
-                    let r_info = Self::info_from_node(&right_n);
-                    self.index.insert(&[l_info, r_info])?;
-
-                    // FIXME: inefficient
-                    // retry from the beginning
-                    drop(left_n);
-                    drop(right_n);
-                    return self.insert(kbegin, m);
-                } else {
-                    let idx = left_n.keys.bsearch(&kbegin);
-                    eprintln!("bsearch returned: {}, searching for {}", idx, kbegin);
-
-                    // bsearch will have returned the lower bound.  We know there are
-                    // no overlapping mappings since we remove the range at the start of
-                    // the insert.  So we can just add one to get the required insert
-                    // position.
-                    let idx = (idx + 1) as usize;
-
-                    left_n.insert_at(idx as usize, kbegin, *m)?;
-                    info.nr_entries += 1;
-                    info.kbegin = left_n.keys.get(0);
-                    let last_idx = info.nr_entries as usize - 1;
-                    info.kend =
-                        left_n.keys.get(last_idx) + left_n.mappings.get(last_idx).len as u32;
-                    eprintln!("m = {:?}", left_n.mappings.get(last_idx));
-                    eprintln!("info = {:?}", info);
-
-                    let infos = [info];
-                    // FIXME: again, we already know where this should be inserted
-                    self.index.insert(&infos)?;
-                }
-            }
+            left_n.insert_at(idx as usize, kbegin, *m)?;
+            new[0] = (left_n.first_key().unwrap(), left_n.loc);
         }
 
+        self.apply_edits(&old, &new)?;
         Ok(())
     }
 }

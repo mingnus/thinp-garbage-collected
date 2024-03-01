@@ -3,6 +3,7 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::{BTreeSet, VecDeque};
 use std::io::Write;
 use std::sync::Arc;
+use tracing::instrument;
 
 use crate::block_allocator::BlockRef;
 use crate::block_cache::*;
@@ -30,6 +31,7 @@ struct NodeHeader {
     value_size: u16,
 }
 
+/// Writes the header of a node to a writer.
 fn write_node_header<W: Write>(w: &mut W, hdr: NodeHeader) -> Result<()> {
     w.write_u32::<LittleEndian>(hdr.flags)?;
     w.write_u32::<LittleEndian>(hdr.nr_entries)?;
@@ -58,6 +60,7 @@ fn read_flags(r: &[u8]) -> Result<BTreeFlags> {
 
 //-------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub struct Node<V: Serializable, Data: Readable> {
     // We cache a copy of the loc because the underlying proxy isn't available.
     // This doesn't get written to disk.
@@ -194,7 +197,6 @@ fn init_node<V: Serializable>(mut block: WriteProxy, is_leaf: bool) -> Result<WN
             value_size: V::packed_len() as u16,
         },
     )?;
-    drop(w);
 
     Ok(w_node(block))
 }
@@ -212,16 +214,20 @@ mod insert_utils {
         let total = nr_left + nr_right;
         let target_left = total / 2;
 
-        if nr_left < target_left {
-            // Move entries from right to left
-            let nr_move = target_left - nr_left;
-            let (keys, values) = right.shift_left(nr_move);
-            left.append(&keys, &values);
-        } else if nr_left > target_left {
-            // Move entries from left to right
-            let nr_move = nr_left - target_left;
-            let (keys, values) = left.remove_right(nr_move);
-            right.prepend(&keys, &values);
+        match nr_left.cmp(&target_left) {
+            std::cmp::Ordering::Less => {
+                // Move entries from right to left
+                let nr_move = target_left - nr_left;
+                let (keys, values) = right.shift_left(nr_move);
+                left.append(&keys, &values);
+            }
+            std::cmp::Ordering::Greater => {
+                // Move entries from left to right
+                let nr_move = nr_left - target_left;
+                let (keys, values) = left.remove_right(nr_move);
+                right.prepend(&keys, &values);
+            }
+            std::cmp::Ordering::Equal => { /* do nothing */ }
         }
     }
 
@@ -295,7 +301,7 @@ mod insert_utils {
         new_parent.flags.set(BTreeFlags::Internal as u32);
         assert!(new_parent.keys.len() == 0);
         assert!(new_parent.values.len() == 0);
-        new_parent.append(&vec![lkeys[0], rkeys[0]], &vec![left.loc, right.loc]);
+        new_parent.append(&[lkeys[0], rkeys[0]], &[left.loc, right.loc]);
 
         // Choose the correct child in the spine
         let left_loc = left.loc;
@@ -503,7 +509,7 @@ mod insert_utils {
         let mut idx = 0isize;
 
         loop {
-            let flags = read_flags(&mut spine.child().r())?;
+            let flags = read_flags(spine.child().r())?;
 
             if flags == BTreeFlags::Internal {
                 let mut child = ensure_space::<u32>(spine, key, idx)?;
@@ -531,23 +537,21 @@ mod insert_utils {
 
                 if idx < 0 {
                     child.keys.insert_at(0, &key);
-                    child.values.insert_at(0, &value);
+                    child.values.insert_at(0, value);
                     child.nr_entries.inc(1);
                 } else if idx as usize >= child.keys.len() {
                     // insert
                     child.keys.append_single(&key);
                     child.values.append_single(value);
                     child.nr_entries.inc(1);
+                } else if child.keys.get(idx as usize) == key {
+                    // overwrite
+                    child.values.set(idx as usize, value);
                 } else {
-                    if child.keys.get(idx as usize) == key {
-                        // overwrite
-                        child.values.set(idx as usize, &value);
-                    } else {
-                        ensure!(child.keys.get(idx as usize) < key);
-                        child.keys.insert_at(idx as usize + 1, &key);
-                        child.values.insert_at(idx as usize + 1, &value);
-                        child.nr_entries.inc(1);
-                    }
+                    ensure!(child.keys.get(idx as usize) < key);
+                    child.keys.insert_at(idx as usize + 1, &key);
+                    child.values.insert_at(idx as usize + 1, value);
+                    child.nr_entries.inc(1);
                 }
 
                 break;
@@ -563,10 +567,10 @@ mod insert_utils {
         new_key: u32,
         value: &V,
     ) -> Result<()> {
-        let mut idx = 0isize;
+        let mut idx;
 
         loop {
-            let flags = read_flags(&mut spine.child().r())?;
+            let flags = read_flags(spine.child().r())?;
 
             if flags == BTreeFlags::Internal {
                 let mut child = w_node::<u32>(spine.child());
@@ -865,7 +869,6 @@ mod remove_utilities {
             let gc_loc = child.values.get(0);
             spine.replace_child_loc(gc_loc)?;
         } else {
-            eprintln!("2");
             let idx = child.keys.bsearch(&key);
             if idx < 0 {
                 // key isn't in the tree
@@ -898,7 +901,7 @@ mod remove_utilities {
         let mut idx = 0isize;
 
         loop {
-            let flags = read_flags(&mut spine.child().r())?;
+            let flags = read_flags(spine.child().r())?;
 
             if flags == BTreeFlags::Internal {
                 let old_loc = spine.child_loc();
@@ -941,6 +944,61 @@ mod remove_utilities {
             }
         }
     }
+
+    /*
+    /// Removes a range of keys from the tree [kbegin, kend).
+    pub fn remove_range<LeafV: Serializable>(
+        spine: &mut Spine,
+        kbegin: u32,
+        kend: u32,
+    ) -> Result<()> {
+        let mut idx = 0isize;
+
+        loop {
+            let flags = read_flags(spine.child().r())?;
+
+            if flags == BTreeFlags::Internal {
+                let old_loc = spine.child_loc();
+                let child = w_node::<MetadataBlock>(spine.child());
+                patch_parent(spine, idx as usize, child.loc);
+
+                drop(child);
+                // FIXME: we could pass child in to save re-getting it
+                rebalance_children::<LeafV>(spine, key)?;
+
+                // The child may have been erased and we don't know what
+                // kind of node the new child is.
+                if spine.child_loc() != old_loc {
+                    continue;
+                }
+
+                // Reaquire the child because it may have changed due to the
+                // rebalance.
+                let child = w_node::<MetadataBlock>(spine.child());
+                idx = child.keys.bsearch(&key);
+
+                // We know the key is present or else rebalance_children would have failed.
+                // FIXME: check this
+                spine.push(child.values.get(idx as usize))?;
+            } else {
+                let mut child = w_node::<LeafV>(spine.child());
+                patch_parent(spine, idx as usize, child.loc);
+
+                let idx = child.keys.bsearch(&key);
+                if idx < 0
+                    || idx as u32 >= child.nr_entries.get()
+                    || child.keys.get(idx as usize) != key
+                {
+                    return Ok(None);
+                }
+
+                let val = child.values.get(idx as usize);
+                child.remove_at(idx as usize);
+                return Ok(Some(val));
+            }
+        }
+    }
+    */
 }
 
 //-------------------------------------------------------------------------
@@ -998,6 +1056,36 @@ fn next_<TreeV: Serializable, NV: Serializable>(
             index: 0,
             nr_entries: n.nr_entries.get() as usize,
         });
+    }
+
+    Ok(true)
+}
+
+fn prev_<TreeV: Serializable, NV: Serializable>(
+    tree: &BTree<TreeV>,
+    stack: &mut Vec<Frame>,
+) -> Result<bool> {
+    if stack.is_empty() {
+        return Ok(false);
+    }
+    let frame = stack.last_mut().unwrap();
+    if frame.index == 0 {
+        // We need to move to the previous node.
+        stack.pop();
+        if !prev_::<TreeV, MetadataBlock>(tree, stack)? {
+            return Ok(false);
+        }
+        let frame = stack.last().unwrap();
+        let n = tree.read_node::<MetadataBlock>(frame.loc)?;
+        let loc = n.values.get(frame.index);
+        let n = tree.read_node::<NV>(loc)?;
+        stack.push(Frame {
+            loc,
+            index: n.nr_entries.get() as usize - 1,
+            nr_entries: n.nr_entries.get() as usize,
+        });
+    } else {
+        frame.index -= 1;
     }
 
     Ok(true)
@@ -1070,7 +1158,9 @@ impl<'a, V: Serializable> Cursor<'a, V> {
         }
     }
 
-    pub fn next(&mut self) -> Result<bool> {
+    // Move cursor to the next entry.  Returns false if there are no more, and
+    // invalidates the cursor.
+    pub fn next_entry(&mut self) -> Result<bool> {
         match &mut self.stack {
             None => Ok(false),
             Some(stack) => {
@@ -1080,6 +1170,37 @@ impl<'a, V: Serializable> Cursor<'a, V> {
                 } else {
                     Ok(true)
                 }
+            }
+        }
+    }
+
+    // Move cursor to the previous entry.  Returns false if there are no more, and
+    // invalidates the cursor.
+    pub fn prev_entry(&mut self) -> Result<bool> {
+        match &mut self.stack {
+            None => Ok(false),
+            Some(stack) => {
+                if !prev_::<V, V>(self.tree, stack)? {
+                    self.stack = None;
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
+        }
+    }
+
+    /// Returns true if the cursor is at the first entry.
+    pub fn is_first(&self) -> bool {
+        match &self.stack {
+            None => false,
+            Some(stack) => {
+                for frame in stack.iter() {
+                    if frame.index != 0 {
+                        return false;
+                    }
+                }
+                true
             }
         }
     }
@@ -1120,7 +1241,7 @@ impl<V: Serializable> BTree<V> {
 
     fn is_leaf(&self, loc: MetadataBlock) -> Result<bool> {
         let b = self.tm.read(loc, &BNODE_KIND)?;
-        let flags = read_flags(&mut b.r())?;
+        let flags = read_flags(b.r())?;
         Ok(flags == BTreeFlags::Leaf)
     }
 
@@ -1135,7 +1256,7 @@ impl<V: Serializable> BTree<V> {
         let mut block = self.tm.read(self.root, &BNODE_KIND)?;
 
         loop {
-            let flags = read_flags(&mut block.r())?;
+            let flags = read_flags(block.r())?;
 
             match flags {
                 BTreeFlags::Internal => {
@@ -1304,7 +1425,7 @@ mod test {
         nr_data_blocks: u64,
     ) -> Result<Arc<Mutex<BlockAllocator>>> {
         const SUPERBLOCK_LOCATION: u32 = 0;
-        let mut allocator = BlockAllocator::new(cache, nr_data_blocks, SUPERBLOCK_LOCATION)?;
+        let allocator = BlockAllocator::new(cache, nr_data_blocks, SUPERBLOCK_LOCATION)?;
         Ok(Arc::new(Mutex::new(allocator)))
     }
 
@@ -1434,7 +1555,6 @@ mod test {
         fix.commit()?;
 
         for k in keys {
-            let v = fix.lookup(*k).unwrap();
             ensure!(fix.lookup(*k) == Some(mk_value(k * 2)));
         }
 
@@ -1613,7 +1733,6 @@ mod test {
         fix.commit()?;
 
         // build a big btree
-        // let count = 100_000;
         let count = 1000;
         for i in 0..count {
             fix.insert(i * 3, &mk_value(i * 3))?;
@@ -1629,7 +1748,43 @@ mod test {
             ensure!(k == expected_key);
             expected_key += 3;
 
-            if !c.next()? {
+            if !c.next_entry()? {
+                ensure!(expected_key == count * 3);
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_prev() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+
+        // build a big btree
+        let count = 1000;
+        for i in 0..count {
+            fix.insert(i * 3, &mk_value(i * 3))?;
+        }
+        eprintln!("built tree");
+
+        let first_key = 601;
+        let mut c = fix.tree.cursor(first_key)?;
+
+        let mut expected_key = (first_key / 3) * 3;
+        loop {
+            let (k, _v) = c.get()?.unwrap();
+            ensure!(k == expected_key);
+
+            c.prev_entry()?;
+            let (k, _v) = c.get()?.unwrap();
+            ensure!(k == expected_key - 3);
+            c.next_entry()?;
+
+            expected_key += 3;
+
+            if !c.next_entry()? {
                 ensure!(expected_key == count * 3);
                 break;
             }

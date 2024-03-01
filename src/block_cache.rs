@@ -90,7 +90,7 @@ impl CacheEntry {
                 lock: LockState::Read(1),
                 dirty: false,
                 block,
-                kind: kind.clone(),
+                kind: *kind,
             }),
             cond: Condvar::new(),
         }
@@ -102,7 +102,7 @@ impl CacheEntry {
                 lock: LockState::Write(get_tid_()),
                 dirty: true,
                 block,
-                kind: kind.clone(),
+                kind: *kind,
             }),
             cond: Condvar::new(),
         }
@@ -307,7 +307,7 @@ impl MetadataCacheInner {
         let hdr = BlockHeader {
             sum: 0,
             loc: block.loc as u32,
-            kind: kind.clone(),
+            kind: *kind,
         };
 
         let mut w = std::io::Cursor::new(block.get_data());
@@ -426,9 +426,9 @@ impl MetadataCacheInner {
 
     /// Writeback all dirty blocks
     pub fn flush(&mut self) -> Result<()> {
-        for (_loc, entry) in &self.cache {
+        for entry in self.cache.values() {
             if !entry.is_held() && entry.is_dirty() {
-                self.writeback_(&*entry)?;
+                self.writeback_(entry)?;
                 entry.clear_dirty();
             }
         }
@@ -606,7 +606,7 @@ impl MetadataCache {
 
                     return Ok(proxy);
                 }
-                Busy(entry) => self.wait_on_entry_(&*entry),
+                Busy(entry) => self.wait_on_entry_(&entry),
             }
         }
     }
@@ -616,26 +616,24 @@ impl MetadataCache {
 
         let mut inner = self.inner.lock().unwrap();
 
-        loop {
-            match inner.gc_lock(loc)? {
-                Locked(entry) => {
-                    let proxy_ = ReadProxy_ {
-                        loc,
-                        cache: self.clone(),
-                        entry: entry.clone(),
-                    };
+        match inner.gc_lock(loc)? {
+            Locked(entry) => {
+                let proxy_ = ReadProxy_ {
+                    loc,
+                    cache: self.clone(),
+                    entry: entry.clone(),
+                };
 
-                    let proxy = ReadProxy {
-                        proxy: Arc::new(proxy_),
-                        begin: 0,
-                        end: BLOCK_SIZE,
-                    };
+                let proxy = ReadProxy {
+                    proxy: Arc::new(proxy_),
+                    begin: 0,
+                    end: BLOCK_SIZE,
+                };
 
-                    return Ok(proxy);
-                }
-                Busy(_) => {
-                    panic!("gc_lock blocked!");
-                }
+                Ok(proxy)
+            }
+            Busy(_) => {
+                panic!("gc_lock blocked!");
             }
         }
     }
@@ -662,7 +660,7 @@ impl MetadataCache {
 
                     return Ok(proxy);
                 }
-                Busy(entry) => self.wait_on_entry_(&*entry),
+                Busy(entry) => self.wait_on_entry_(&entry),
             }
         }
     }
@@ -690,7 +688,7 @@ impl MetadataCache {
 
                     return Ok(proxy);
                 }
-                Busy(entry) => self.wait_on_entry_(&*entry),
+                Busy(entry) => self.wait_on_entry_(&entry),
             }
         }
     }
@@ -737,8 +735,8 @@ mod test {
     }
 
     fn verify(data: &[u8], byte: u8) {
-        for i in BLOCK_HEADER_SIZE..data.len() {
-            assert!(data[i] == byte);
+        for b in data.iter().skip(BLOCK_HEADER_SIZE) {
+            assert!(*b == byte);
         }
     }
 

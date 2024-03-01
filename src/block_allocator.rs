@@ -8,7 +8,7 @@ use crate::block_cache::*;
 use crate::byte_types::*;
 
 // cyclic dependencies
-use crate::btree::*;
+use crate::btree::btree::*;
 
 //-------------------------------------------------------------------------
 

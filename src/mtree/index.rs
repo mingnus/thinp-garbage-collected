@@ -1,172 +1,178 @@
 use anyhow::{ensure, Result};
+use std::sync::Arc;
+
+use crate::block_cache::MetadataBlock;
+use crate::btree::btree::*;
+use crate::mtree::diff::*;
+use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
 
-// FIXME: An in core implementation to get the interface right
-// FIXME: Very slow
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BlockInfo {
-    pub loc: u32,
-    pub nr_entries: u32,
-    pub kbegin: u32,
-
-    // FIXME: do we really need this?  it means we have to update the info in the btree
-    // very frequently.
-    pub kend: u32,
-}
-
 pub struct Index {
-    // FIXME: rename to infos
-    nodes: Vec<BlockInfo>,
-}
-
-#[derive(Eq, PartialEq)]
-pub enum InfoResult {
-    Update(usize, BlockInfo),
-    New(usize),
+    tree: BTree<u32>,
 }
 
 impl Index {
-    pub fn new() -> Self {
-        Self { nodes: Vec::new() }
+    pub fn new(tm: Arc<TransactionManager>, context: ReferenceContext) -> Result<Self> {
+        let tree = BTree::empty_tree(tm, context)?;
+        Ok(Self { tree })
     }
 
     pub fn root(&self) -> u32 {
-        // FIXME: should be the root of the btree that holds the index
-        0
+        self.tree.root()
     }
 
-    /// Returns the index range for infos that overlap with the given key range.
-    fn get_range(&self, kbegin: u32, kend: u32) -> Result<(usize, usize)> {
-        let len = self.nodes.len();
-        let mut begin = len;
+    fn get_cursor(&self, kbegin: u32) -> Result<Cursor<u32>> {
+        self.tree.cursor(kbegin)
+    }
 
-        for i in 0..len {
-            let info = &self.nodes[i];
-            if info.kend > kbegin {
-                begin = i;
-                break;
+    // Returns a the index entries within the range [kbegin, kend)
+    pub fn lookup(&self, kbegin: u32, kend: u32) -> Result<Vec<KeyValue>> {
+        let mut cursor = self.get_cursor(kbegin)?;
+
+        let mut results = Vec::new();
+        loop {
+            if let Some(kv) = cursor.get()? {
+                if kv.0 >= kend {
+                    break;
+                }
+
+                results.push(kv.clone());
+            }
+            cursor.next_entry()?;
+        }
+
+        Ok(results)
+    }
+
+    // Returns a range of index entries within the range [kbegin, kend).  In addition
+    // it will ensure the first entry has a mapping below kbegin, and the last entry
+    // has a mapping above kend.  This is useful if you're replacing a range since it
+    // guarantees you have an entry to insert into.
+    pub fn lookup_extra(&self, kbegin: u32, kend: u32) -> Result<Vec<KeyValue>> {
+        let mut cursor = self.get_cursor(kbegin)?;
+        let mut results = Vec::new();
+
+        // do we need to back up?
+        if let Some(kv) = cursor.get()? {
+            if kv.0 == kbegin && !cursor.is_first() {
+                cursor.prev_entry()?;
             }
         }
 
-        let mut end = len;
-        for i in begin..len {
-            let info = &self.nodes[i];
-            if info.kbegin >= kend {
-                end = i;
-                break;
+        loop {
+            if let Some(kv) = cursor.get()? {
+                if kv.0 > kend {
+                    results.push(kv.clone());
+                    break;
+                }
+                results.push(kv.clone());
             }
+            cursor.next_entry()?;
         }
 
-        Ok((begin, end))
+        Ok(results)
     }
 
-    // Returns a (begin, end) pair of indexes to the block infos
-    pub fn lookup(&self, kbegin: u32, kend: u32) -> Result<&[BlockInfo]> {
-        let (begin, end) = self.get_range(kbegin, kend)?;
-        Ok(&self.nodes[begin..end])
-    }
-
-    fn insert_at_(&mut self, idx: usize, infos: &[BlockInfo]) -> Result<()> {
-        for info in infos.iter().rev() {
-            self.nodes.insert(idx, *info);
-        }
-
+    pub fn replace(&mut self, old: &[KeyValue], new: &[KeyValue]) -> Result<()> {
+        /*
+                let edits = calc_edits(old, new)?;
+                for edit in edits {
+                    match edit {
+                        Edit::RemoveRange(kbegin, Some(kend)) => {
+                            self.tree.remove_range(kbegin, kend)?;
+                        }
+                        Edit::Insert((key, value)) => {
+                            self.tree.insert(key, &value)?;
+                        }
+                    }
+                }
+        */
         Ok(())
-    }
-
-    fn overlaps_(infos: &[BlockInfo]) -> bool {
-        let mut kend = 0;
-        for info in infos {
-            if info.kbegin < kend {
-                return true;
-            }
-            assert!(info.kbegin < info.kend);
-            kend = info.kend;
-        }
-
-        false
     }
 
     /// Inserts a new sequence of infos.  The infos must be in sequence
     /// and must not overlap with themselves, or the infos already in the
     /// index.
-    pub fn insert(&mut self, infos: &[BlockInfo]) -> Result<()> {
-        // Validate
-        ensure!(!Self::overlaps_(infos));
-
-        // Calculate where to insert
-        let idx = self
-            .nodes
-            .partition_point(|&info| info.kend < infos[0].kbegin);
-
-        // check for overlap at start
-        if idx > 0 {
-            let prior = &self.nodes[idx - 1];
-            ensure!(prior.kend <= infos[0].kbegin);
+    pub fn insert_many(&mut self, new: &[KeyValue]) -> Result<()> {
+        for (key, value) in new {
+            self.tree.insert(*key, value)?;
         }
 
-        // Check for overlap at end
-        if idx < self.nodes.len() {
-            let next = &self.nodes[idx];
-            ensure!(next.kbegin >= infos.last().unwrap().kend);
-        }
-
-        self.insert_at_(idx, infos)
+        Ok(())
     }
 
-    // FIXME: remove
-    /// Removes infos that _overlap_ the given key range
-    pub fn remove(&mut self, kbegin: u32, kend: u32) -> Result<(usize, Vec<BlockInfo>)> {
-        let mut results = Vec::new();
-        let (idx_begin, idx_end) = self.get_range(kbegin, kend)?;
-        for _ in idx_begin..idx_end {
-            results.push(self.nodes.remove(idx_begin));
-        }
-
-        Ok((idx_begin, results))
+    pub fn insert(&mut self, new: KeyValue) -> Result<()> {
+        self.tree.insert(new.0, &new.1)?;
+        Ok(())
     }
 
-    /// Finds and removes and info where we can insert the given key range.  You will
-    /// need to re-insert the info once the mapping block has been updated.
-    pub fn info_for_insert(&mut self, kbegin: u32, kend: u32) -> Result<InfoResult> {
-        if self.nodes.is_empty() {
-            return Ok(InfoResult::New(0));
-        }
-
-        // FIXME: we only need idx_begin
-        let (mut idx_begin, _) = self.get_range(kbegin, kend)?;
-        eprintln!("idx_begin = {}", idx_begin);
-        if (idx_begin >= self.nodes.len()) || (self.nodes[idx_begin].kbegin > kend && idx_begin > 0)
-        {
-            // FIXME: if prior is full consider the next info anyway
-            eprintln!("decrementing");
-            idx_begin -= 1;
-        }
-
-        let info = self.nodes.remove(idx_begin);
-        return Ok(InfoResult::Update(idx_begin, info));
-    }
-
-    pub fn dump(&self) {
-        eprintln!("infos: {:?}", self.nodes);
+    pub fn remove(&mut self, kbegin: u32, kend: u32) -> Result<()> {
+        self.tree.remove_range(kbegin, kend)?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
-mod index {
+mod test {
     use super::*;
+    use crate::block_allocator::*;
+    use crate::block_cache::*;
+    use crate::core::*;
+    use anyhow::Result;
+    use std::sync::{Arc, Mutex};
+    use thinp::io_engine::*;
 
+    fn mk_engine(nr_blocks: u32) -> Arc<dyn IoEngine> {
+        Arc::new(CoreIoEngine::new(nr_blocks as u64))
+    }
+
+    fn mk_allocator(
+        cache: Arc<MetadataCache>,
+        nr_data_blocks: u64,
+    ) -> Result<Arc<Mutex<BlockAllocator>>> {
+        const SUPERBLOCK_LOCATION: u32 = 0;
+        let allocator = BlockAllocator::new(cache, nr_data_blocks, SUPERBLOCK_LOCATION)?;
+        Ok(Arc::new(Mutex::new(allocator)))
+    }
+
+    #[allow(dead_code)]
+    struct Fixture {
+        engine: Arc<dyn IoEngine>,
+        cache: Arc<MetadataCache>,
+        allocator: Arc<Mutex<BlockAllocator>>,
+        tm: Arc<TransactionManager>,
+        index: Index,
+    }
+
+    impl Fixture {
+        fn new(nr_metadata_blocks: u32, nr_data_blocks: u64) -> Result<Self> {
+            let engine = mk_engine(nr_metadata_blocks);
+            let cache = Arc::new(MetadataCache::new(engine.clone(), 16)?);
+            let allocator = mk_allocator(cache.clone(), nr_data_blocks)?;
+            let tm = Arc::new(TransactionManager::new(allocator.clone(), cache.clone()));
+            let index = Index::new(tm.clone(), ReferenceContext::Force)?;
+
+            Ok(Self {
+                engine,
+                cache,
+                allocator,
+                tm,
+                index,
+            })
+        }
+    }
+
+    /*
     #[test]
     fn empty() -> Result<()> {
-        let _ = Index::new();
+        let mut _fix = Fixture::new(16, 1024)?;
         Ok(())
     }
 
     #[test]
     fn insert() -> Result<()> {
-        let mut index = Index::new();
+        let mut fix = Fixture::new(1024, 102400)?;
         let infos = [
             BlockInfo {
                 loc: 0,
@@ -368,6 +374,7 @@ mod index {
 
         Ok(())
     }
+    */
 }
 
 //-------------------------------------------------------------------------

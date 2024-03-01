@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 const NULL_NODE: u8 = 255;
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 struct Internal {
     holders: usize,
@@ -14,6 +15,7 @@ struct Internal {
     right: u8,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 struct Extent {
     begin: u64,
@@ -21,12 +23,14 @@ struct Extent {
     cursor: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct Leaf {
     extent: Arc<Mutex<Extent>>,
     holders: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 enum Node {
     Internal(Internal),
