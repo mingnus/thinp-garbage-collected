@@ -151,7 +151,7 @@ mod test {
             let cache = Arc::new(MetadataCache::new(engine.clone(), 16)?);
             let allocator = mk_allocator(cache.clone(), nr_data_blocks)?;
             let tm = Arc::new(TransactionManager::new(allocator.clone(), cache.clone()));
-            let index = Index::new(tm.clone(), ReferenceContext::Force)?;
+            let index = Index::new(tm.clone(), ReferenceContext::ThinId(0))?;
 
             Ok(Self {
                 engine,

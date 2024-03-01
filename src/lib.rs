@@ -7,6 +7,7 @@ pub mod byte_types;
 pub mod core;
 pub mod mtree;
 pub mod packed_array;
+pub mod scope_id;
 pub mod spine;
 pub mod thin_metadata;
 pub mod transaction_manager;

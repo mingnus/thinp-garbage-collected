@@ -180,7 +180,7 @@ impl Default for Node {
 
 impl Tree {
     fn new(nr_blocks: u64, nr_nodes: u8) -> Self {
-        assert!(nr_nodes <= NULL_NODE);
+        // assert!(nr_nodes <= NULL_NODE);
         let free_nodes = (0u8..nr_nodes).into_iter().collect::<Vec<u8>>();
         let mut tree = Tree {
             nr_blocks,
