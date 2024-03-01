@@ -616,26 +616,24 @@ impl MetadataCache {
 
         let mut inner = self.inner.lock().unwrap();
 
-        loop {
-            match inner.gc_lock(loc)? {
-                Locked(entry) => {
-                    let proxy_ = ReadProxy_ {
-                        loc,
-                        cache: self.clone(),
-                        entry: entry.clone(),
-                    };
+        match inner.gc_lock(loc)? {
+            Locked(entry) => {
+                let proxy_ = ReadProxy_ {
+                    loc,
+                    cache: self.clone(),
+                    entry: entry.clone(),
+                };
 
-                    let proxy = ReadProxy {
-                        proxy: Arc::new(proxy_),
-                        begin: 0,
-                        end: BLOCK_SIZE,
-                    };
+                let proxy = ReadProxy {
+                    proxy: Arc::new(proxy_),
+                    begin: 0,
+                    end: BLOCK_SIZE,
+                };
 
-                    return Ok(proxy);
-                }
-                Busy(_) => {
-                    panic!("gc_lock blocked!");
-                }
+                return Ok(proxy);
+            }
+            Busy(_) => {
+                panic!("gc_lock blocked!");
             }
         }
     }
