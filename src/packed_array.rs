@@ -70,6 +70,10 @@ impl<S: Serializable, Data: Readable> PArray<S, Data> {
         self.nr_entries
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.nr_entries == 0
+    }
+
     /// Check the index is less than the current nr of entries
     pub fn check_idx(&self, idx: usize) {
         assert!(idx < self.nr_entries);

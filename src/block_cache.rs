@@ -400,7 +400,7 @@ impl MetadataCacheInner {
         }
     }
 
-    ///! Write lock and zero the data (avoids reading the block)
+    /// Write lock and zero the data (avoids reading the block)
     pub fn zero_lock(&mut self, loc: u32, kind: &Kind) -> Result<LockResult> {
         use LockResult::*;
 
@@ -665,7 +665,7 @@ impl MetadataCache {
         }
     }
 
-    ///! Write lock and zero the data (avoids reading the block)
+    /// Write lock and zero the data (avoids reading the block)
     pub fn zero_lock(self: &Arc<Self>, loc: u32, kind: &Kind) -> Result<WriteProxy> {
         use LockResult::*;
 

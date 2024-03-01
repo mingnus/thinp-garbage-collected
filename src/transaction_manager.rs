@@ -27,7 +27,7 @@ pub enum ReferenceContext {
 struct TransactionManager_ {
     allocator: Arc<Mutex<BlockAllocator>>,
     cache: Arc<MetadataCache>,
-    pub scopes: Mutex<ScopeRegister>,
+    pub scopes: Arc<Mutex<ScopeRegister>>,
     shadows: BTreeSet<(ReferenceContext, MetadataBlock)>,
 
     // While a transaction is in progress we must keep the superblock
@@ -43,7 +43,7 @@ impl TransactionManager_ {
         Self {
             allocator,
             cache,
-            scopes: Mutex::new(ScopeRegister::default()),
+            scopes: Arc::new(Mutex::new(ScopeRegister::default())),
             shadows: BTreeSet::new(),
             superblock: Some(superblock),
         }
@@ -153,6 +153,12 @@ impl TransactionManager {
         Self {
             inner: Mutex::new(TransactionManager_::new(allocator, cache)),
         }
+    }
+
+    pub fn scopes(&mut self) -> Arc<Mutex<ScopeRegister>> {
+        use std::ops::DerefMut;
+        let mut inner = self.inner.lock().unwrap();
+        inner.deref_mut().scopes.clone()
     }
 
     pub fn commit(&self, roots: &[MetadataBlock]) -> Result<()> {

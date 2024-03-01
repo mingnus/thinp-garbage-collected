@@ -190,7 +190,6 @@ fn init_bitmap(mut block: WriteProxy) -> Result<Bitmap<WriteProxy>> {
         sum: 0,
     };
     write_block_header(&mut w, &hdr)?;
-    drop(w);
 
     let ie = IndexEntry::new(loc);
     Ok(Bitmap::new(&ie, block))
@@ -275,7 +274,6 @@ fn init_index_block(mut block: WriteProxy) -> Result<MetadataIndex<WriteProxy>> 
 
     w.write_u64::<LittleEndian>(0)?;
 
-    drop(w);
     Ok(MetadataIndex::new(block.loc(), block))
 }
 
@@ -374,6 +372,10 @@ impl Bitset {
 
     pub fn len(&self) -> u64 {
         self.nr_bits
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nr_bits == 0
     }
 
     pub fn count(&self) -> u64 {

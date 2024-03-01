@@ -113,7 +113,7 @@ impl BlockAllocator {
     }
 
     pub fn set_roots(&mut self, roots: &[u32]) {
-        self.roots = roots.iter().cloned().collect();
+        self.roots = roots.to_vec();
     }
 
     pub fn allocate_metadata(&mut self) -> Result<Option<u32>> {
