@@ -103,8 +103,8 @@ fn split_beneath<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
     // setup the parent to point to the two new children
     let mut new_parent = w_node::<MetadataBlock>(spine.child());
     new_parent.flags.set(BTreeFlags::Internal as u32);
-    assert!(new_parent.keys.len() == 0);
-    assert!(new_parent.values.len() == 0);
+    assert!(new_parent.keys.is_empty());
+    assert!(new_parent.values.is_empty());
     new_parent.append(&[lkeys[0], rkeys[0]], &[left.loc, right.loc]);
 
     // Choose the correct child in the spine

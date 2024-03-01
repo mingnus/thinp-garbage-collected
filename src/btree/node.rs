@@ -103,7 +103,7 @@ impl<V: Serializable, Data: Readable> Node<V, Data> {
     }
 
     pub fn first_key(&self) -> Option<u32> {
-        if self.keys.len() == 0 {
+        if self.keys.is_empty() {
             None
         } else {
             Some(self.keys.get(0))
