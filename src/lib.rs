@@ -8,6 +8,7 @@ pub mod core;
 pub mod extent_allocator;
 pub mod mtree;
 pub mod packed_array;
+pub mod scope_id;
 pub mod spine;
 pub mod thin_metadata;
 pub mod transaction_manager;

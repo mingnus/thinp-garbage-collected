@@ -5,6 +5,7 @@ use crate::block_allocator::*;
 use crate::block_cache::*;
 use crate::block_kinds::*;
 use crate::byte_types::*;
+use crate::scope_id::*;
 
 use std::sync::{Arc, Mutex};
 
@@ -18,12 +19,15 @@ use std::sync::{Arc, Mutex};
 pub enum ReferenceContext {
     DevTree,     // There is a single dev tree per pool.
     ThinId(u32), // mtrees or btrees are associated with a thin id.
-    Force,       // Always copy.
+    Scoped(u32), // A temprorary context that lives for a code scope.
 }
+
+//------------------------------------------------------------------------------
 
 struct TransactionManager_ {
     allocator: Arc<Mutex<BlockAllocator>>,
     cache: Arc<MetadataCache>,
+    pub scopes: Mutex<ScopeRegister>,
     shadows: BTreeSet<(ReferenceContext, MetadataBlock)>,
 
     // While a transaction is in progress we must keep the superblock
@@ -39,6 +43,7 @@ impl TransactionManager_ {
         Self {
             allocator,
             cache,
+            scopes: Mutex::new(ScopeRegister::default()),
             shadows: BTreeSet::new(),
             superblock: Some(superblock),
         }
@@ -120,7 +125,7 @@ impl TransactionManager_ {
         old_loc: MetadataBlock,
         kind: &Kind,
     ) -> Result<WriteProxy> {
-        if context != ReferenceContext::Force && self.shadows.contains(&(context, old_loc)) {
+        if self.shadows.contains(&(context, old_loc)) {
             Ok(self.cache.write_lock(old_loc, kind)?)
         } else if let Some(loc) = self.allocator.lock().unwrap().allocate_metadata()? {
             eprintln!("shadowing {}", old_loc);
