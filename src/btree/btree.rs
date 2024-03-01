@@ -1,9 +1,6 @@
-use anyhow::{anyhow, ensure, Result};
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use anyhow::{ensure, Result};
 use std::collections::{BTreeSet, VecDeque};
-use std::io::Write;
 use std::sync::Arc;
-use tracing::instrument;
 
 use crate::block_allocator::BlockRef;
 use crate::block_cache::*;
@@ -426,6 +423,7 @@ mod test {
     use crate::block_allocator::*;
     use crate::core::*;
     use anyhow::{ensure, Result};
+    use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
     use rand::seq::SliceRandom;
     use std::io::{self, Read, Write};
     use std::sync::{Arc, Mutex};
