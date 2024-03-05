@@ -90,6 +90,14 @@ impl<S: Serializable, Data: Readable> PArray<S, Data> {
         S::unpack(&mut data.r()).unwrap()
     }
 
+    /// Return the last element of the array, if present
+    pub fn last(&self) -> Option<S> {
+        match self.nr_entries {
+            0 => None,
+            n => Some(self.get(n - 1)),
+        }
+    }
+
     pub fn bsearch(&self, key: &S) -> isize {
         if self.nr_entries == 0 {
             return -1;
@@ -147,6 +155,11 @@ impl<S: Serializable, Data: Writeable> PArray<S, Data> {
         }
         self.nr_entries -= count;
         lost
+    }
+
+    pub fn remove_from(&mut self, idx: usize) {
+        assert!(idx <= self.nr_entries);
+        self.nr_entries = idx;
     }
 
     pub fn insert_at(&mut self, idx: usize, value: &S) {

@@ -7,30 +7,7 @@ use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
 
-/// A Spine is a stack of nodes that are being modified.  They always
-/// start with the superblock.  Any operation that modifies a data structure
-/// should use this.
-// FIXME: Should tm create these?
-// How do we handle nested btrees?
-
-/*
-fn insert_mapping(spine: &mut Spine, thin_id: u32, mapping: u64) -> Result<()> {
-    let dev_scope = spine.scope();
-
-    let dev_root = todo!();
-    let dev_tree = BTree::new(dev_root)?;
-    let mroot = dev_tree.lookup(thin_id)?;
-
-    let mapping_tree = BTree::new(mroot.get())?;
-    mapping_tree.insert(spine, mapping)?;
-
-    mroot.set(m_scope.get());
-    // FIXME: set new dev root in superblock
-
-    Ok(())
-}
-*/
-
+/// A Spine is a stack of nodes that are being modified.
 pub struct Spine {
     pub tm: Arc<TransactionManager>, // FIXME: stop this being public
     context: ReferenceContext,
@@ -93,15 +70,6 @@ impl Spine {
         let block = self.tm.read(loc, &BNODE_KIND)?;
         Ok(block)
     }
-
-    /*
-    fn parent_loc(&self) -> ReferenceContext {
-        match self.parent {
-            None => self.root_context,
-            Some(ref p) => ReferenceContext::Block(p.loc()),
-        }
-    }
-    */
 
     /// Used for temporary writes, such as siblings for rebalancing.
     /// We can always use replace_child() to put them on the spine.

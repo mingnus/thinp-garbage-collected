@@ -243,6 +243,15 @@ impl<V: Serializable> BTree<V> {
         })
     }
 
+    pub fn clone(&self, context: ReferenceContext) -> Self {
+        Self {
+            tm: self.tm.clone(),
+            context,
+            root: self.root,
+            phantom: self.phantom,
+        }
+    }
+
     pub fn root(&self) -> u32 {
         self.root
     }
@@ -326,6 +335,17 @@ impl<V: Serializable> BTree<V> {
         let r = remove::remove(&mut spine, key)?;
         self.root = spine.get_root();
         Ok(r)
+    }
+
+    pub fn remove_geq<SplitFn: FnOnce(u32, &V) -> (u32, V)>(
+        &mut self,
+        key: u32,
+        split_fn: SplitFn,
+    ) -> Result<()> {
+        let mut spine = self.mk_spine()?;
+        remove::remove_geq(&mut spine, key, split_fn)?;
+        self.root = spine.get_root();
+        Ok(())
     }
 
     //-------------------------------
@@ -425,6 +445,7 @@ mod test {
     use anyhow::{ensure, Result};
     use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
     use rand::seq::SliceRandom;
+    use rand::Rng;
     use std::io::{self, Read, Write};
     use std::sync::{Arc, Mutex};
     use thinp::io_engine::*;
@@ -443,10 +464,10 @@ mod test {
     }
 
     // We'll test with a value type that is a different size to the internal node values (u32).
-    #[derive(Ord, PartialOrd, PartialEq, Eq, Debug)]
+    #[derive(Ord, PartialOrd, PartialEq, Eq, Debug, Copy, Clone)]
     struct Value {
         v: u32,
-        extra: u16,
+        len: u32,
     }
 
     impl Serializable for Value {
@@ -456,14 +477,14 @@ mod test {
 
         fn pack<W: Write>(&self, w: &mut W) -> io::Result<()> {
             w.write_u32::<LittleEndian>(self.v)?;
-            w.write_u16::<LittleEndian>(self.extra)?;
+            w.write_u16::<LittleEndian>(self.len as u16)?;
             Ok(())
         }
 
         fn unpack<R: Read>(r: &mut R) -> io::Result<Self> {
             let v = r.read_u32::<LittleEndian>()?;
-            let extra = r.read_u16::<LittleEndian>()?;
-            Ok(Self { v, extra })
+            let len = r.read_u16::<LittleEndian>()?;
+            Ok(Self { v, len: len as u32 })
         }
     }
 
@@ -493,6 +514,16 @@ mod test {
             })
         }
 
+        fn clone(&self, context: ReferenceContext) -> Self {
+            Self {
+                engine: self.engine.clone(),
+                cache: self.cache.clone(),
+                allocator: self.allocator.clone(),
+                tm: self.tm.clone(),
+                tree: self.tree.clone(context),
+            }
+        }
+
         fn check(&self) -> Result<u32> {
             self.tree.check()
         }
@@ -520,7 +551,7 @@ mod test {
     }
 
     fn mk_value(v: u32) -> Value {
-        Value { v, extra: 0 }
+        Value { v, len: 3 }
     }
 
     #[test]
@@ -548,7 +579,6 @@ mod test {
         fix.commit()?;
 
         fix.insert(0, &mk_value(100))?;
-        fix.commit()?; // FIXME: shouldn't be needed
         ensure!(fix.lookup(0) == Some(mk_value(100)));
 
         Ok(())
@@ -802,6 +832,102 @@ mod test {
                 break;
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn remove_geq_empty() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+
+        let no_split = |k: u32, v: &Value| (k, *v);
+
+        fix.tree.remove_geq(100, no_split)?;
+        ensure!(fix.tree.check()? == 0);
+        Ok(())
+    }
+
+    fn build_tree(fix: &mut Fixture, count: u32) -> Result<()> {
+        fix.commit()?;
+
+        for i in 0..count {
+            fix.insert(i, &mk_value(i * 3))?;
+        }
+
+        Ok(())
+    }
+
+    fn remove_geq_and_verify(fix: &mut Fixture, cut: u32) -> Result<()> {
+        let no_split = |k: u32, v: &Value| (k, *v);
+        fix.tree.remove_geq(cut, no_split)?;
+        ensure!(fix.tree.check()? == cut);
+
+        let mut c = fix.tree.cursor(0)?;
+
+        // Check all entries are below 50
+        for i in 0..cut {
+            let (k, v) = c.get()?.unwrap();
+            ensure!(k == i);
+            ensure!(v.v == i * 3);
+            c.next_entry()?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn remove_geq_small() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        build_tree(&mut fix, 100)?;
+        remove_geq_and_verify(&mut fix, 50)
+    }
+
+    #[test]
+    fn remove_geq_large() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        let nr_entries = 10_000;
+        build_tree(&mut fix, nr_entries)?;
+
+        let nr_loops = 50;
+
+        for i in 0..nr_loops {
+            eprintln!("loop {}", i);
+            let scopes = fix.tm.scopes();
+            let mut scopes = scopes.lock().unwrap();
+            let scope = scopes.new_scope();
+            let mut fix = fix.clone(ReferenceContext::Scoped(scope.id));
+            let cut = rand::thread_rng().gen_range(0..nr_entries);
+            remove_geq_and_verify(&mut fix, cut)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn remove_geq_split() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+
+        let cut = 150;
+        let split = |k: u32, v: &Value| {
+            if k + v.len > cut {
+                (
+                    k,
+                    Value {
+                        v: v.v,
+                        len: cut - k,
+                    },
+                )
+            } else {
+                (k, *v)
+            }
+        };
+
+        fix.insert(100, &Value { v: 200, len: 100 })?;
+        fix.tree.remove_geq(150, split)?;
+
+        ensure!(fix.tree.check()? == 1);
+        ensure!(fix.tree.lookup(100)?.unwrap() == Value { v: 200, len: 50 });
 
         Ok(())
     }

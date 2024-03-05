@@ -109,6 +109,22 @@ impl<V: Serializable, Data: Readable> Node<V, Data> {
             Some(self.keys.get(0))
         }
     }
+
+    pub fn last(&self) -> Option<(u32, V)> {
+        self.keys
+            .last()
+            .and_then(|k| self.values.last().map(|v| (k, v)))
+    }
+
+    #[allow(dead_code)]
+    pub fn nr_entries(&self) -> usize {
+        self.nr_entries.get() as usize
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.nr_entries() == 0
+    }
 }
 
 impl<V: Serializable, Data: Writeable> Node<V, Data> {
@@ -150,6 +166,12 @@ impl<V: Serializable, Data: Writeable> Node<V, Data> {
         let values = self.values.remove_right(count);
         self.nr_entries.dec(count as u32);
         (keys, values)
+    }
+
+    pub fn remove_from(&mut self, idx: usize) {
+        self.keys.remove_from(idx);
+        self.values.remove_from(idx);
+        self.nr_entries.set(idx as u32);
     }
 }
 

@@ -330,59 +330,95 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
     }
 }
 
-/*
-/// Removes a range of keys from the tree [kbegin, kend).
-pub fn remove_range<LeafV: Serializable>(
+//----------------
+
+/// Remove all entries from a node with key >= `key`
+fn node_remove_geq<V: Serializable>(child: &mut Node<V, WriteProxy>, key: u32) -> Result<()> {
+    let nr_entries = child.nr_entries.get() as usize;
+
+    // If there are no entries, nothing to be done.
+    if nr_entries == 0 {
+        return Ok(());
+    }
+
+    // Search for the key in the child node.  This will return
+    // the highest index with key that's <= `key` (possibly -1).
+    let search_result = child.keys.bsearch(&key);
+
+    // If all entries are > `key`, remove everything and finish
+    if search_result < 0 {
+        child.remove_from(0);
+        return Ok(());
+    }
+
+    // If the all entries are < `key`, nothing to be done.
+    if search_result as usize >= nr_entries {
+        return Ok(());
+    }
+
+    let idx = search_result as usize;
+
+    // If the key exactly matches, include this key in the removal
+    if child.keys.get(idx) == key {
+        child.remove_from(idx);
+    } else {
+        // Remove all entries above `idx`
+        child.remove_from(idx + 1);
+    }
+
+    Ok(())
+}
+
+/// Removes all entries in the btree that are >= `key`.  This can leave empty nodes which
+/// will need to be corrected when the two halves are zipped up.
+/// The split function is used to trim the new last entry in the tree.
+pub fn remove_geq<LeafV: Serializable, SplitFn: FnOnce(u32, &LeafV) -> (u32, LeafV)>(
     spine: &mut Spine,
-    kbegin: u32,
-    kend: u32,
+    key: u32,
+    split_fn: SplitFn,
 ) -> Result<()> {
-    let mut idx = 0isize;
+    let mut parent_idx = 0;
 
+    // This loop walks down the spine corresponding to `key`.
     loop {
-        let flags = read_flags(spine.child().r())?;
+        match read_flags(spine.child().r())? {
+            BTreeFlags::Internal => {
+                let mut child = w_node::<MetadataBlock>(spine.child());
+                patch_parent(spine, parent_idx, child.loc);
+                node_remove_geq(&mut child, key)?;
 
-        if flags == BTreeFlags::Internal {
-            let old_loc = spine.child_loc();
-            let child = w_node::<MetadataBlock>(spine.child());
-            patch_parent(spine, idx as usize, child.loc);
-
-            drop(child);
-            // FIXME: we could pass child in to save re-getting it
-            rebalance_children::<LeafV>(spine, key)?;
-
-            // The child may have been erased and we don't know what
-            // kind of node the new child is.
-            if spine.child_loc() != old_loc {
-                continue;
+                let nr_entries = child.keys.len();
+                if nr_entries > 0 {
+                    // Continue with the grandchild
+                    parent_idx = nr_entries - 1;
+                    spine.push(child.values.get(parent_idx))?;
+                } else {
+                    // Empty node
+                    break;
+                }
             }
+            BTreeFlags::Leaf => {
+                let mut child = w_node::<LeafV>(spine.child());
+                patch_parent(spine, parent_idx, child.loc);
+                node_remove_geq(&mut child, key)?;
 
-            // Reaquire the child because it may have changed due to the
-            // rebalance.
-            let child = w_node::<MetadataBlock>(spine.child());
-            idx = child.keys.bsearch(&key);
-
-            // We know the key is present or else rebalance_children would have failed.
-            // FIXME: check this
-            spine.push(child.values.get(idx as usize))?;
-        } else {
-            let mut child = w_node::<LeafV>(spine.child());
-            patch_parent(spine, idx as usize, child.loc);
-
-            let idx = child.keys.bsearch(&key);
-            if idx < 0
-                || idx as u32 >= child.nr_entries.get()
-                || child.keys.get(idx as usize) != key
-            {
-                return Ok(None);
+                // The last entry in the leaf may in turn need splitting.
+                if let Some((key_old, value_old)) = child.last() {
+                    let idx = child.keys.len() - 1;
+                    let (key_new, value_new) = split_fn(key_old, &value_old);
+                    if key_new != key_old {
+                        child.keys.set(idx, &key_new);
+                    }
+                    if value_new != value_old {
+                        child.values.set(idx, &value_new);
+                    }
+                }
+                break;
             }
-
-            let val = child.values.get(idx as usize);
-            child.remove_at(idx as usize);
-            return Ok(Some(val));
         }
     }
+
+    Ok(())
 }
-*/
 
 //-------------------------------------------------------------------------

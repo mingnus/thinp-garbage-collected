@@ -155,7 +155,7 @@ impl TransactionManager {
         }
     }
 
-    pub fn scopes(&mut self) -> Arc<Mutex<ScopeRegister>> {
+    pub fn scopes(&self) -> Arc<Mutex<ScopeRegister>> {
         use std::ops::DerefMut;
         let mut inner = self.inner.lock().unwrap();
         inner.deref_mut().scopes.clone()
