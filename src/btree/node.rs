@@ -110,6 +110,12 @@ impl<V: Serializable, Data: Readable> Node<V, Data> {
         }
     }
 
+    pub fn first(&self) -> Option<(u32, V)> {
+        self.keys
+            .first()
+            .and_then(|k| self.values.first().map(|v| (k, v)))
+    }
+
     pub fn last(&self) -> Option<(u32, V)> {
         self.keys
             .last()

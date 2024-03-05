@@ -421,4 +421,83 @@ pub fn remove_geq<LeafV: Serializable, SplitFn: FnOnce(u32, &LeafV) -> (u32, Lea
     Ok(())
 }
 
+//----------------
+
+/// Remove all entries from a node with key < `key`
+fn node_remove_lt<V: Serializable>(child: &mut Node<V, WriteProxy>, key: u32) -> Result<()> {
+    let nr_entries = child.nr_entries.get() as usize;
+
+    // If there are no entries, nothing to be done.
+    if nr_entries == 0 {
+        return Ok(());
+    }
+
+    // Search for the key in the child node.  This will return
+    // the highest index with key that's <= `key` (possibly -1).
+    let search_result = child.keys.bsearch(&key);
+
+    // If all entries are >= `key`, nothing to be done.
+    if search_result < 0 {
+        return Ok(());
+    }
+
+    // If the all entries are > `key`, remove everything.
+    if search_result as usize >= nr_entries {
+        child.remove_from(0);
+        return Ok(());
+    }
+
+    let idx = search_result as usize;
+
+    // Remove all entries starting from the beginning up to `idx`
+    child.shift_left(idx);
+
+    Ok(())
+}
+
+pub fn remove_lt<LeafV: Serializable, SplitFn: FnOnce(u32, &LeafV) -> (u32, LeafV)>(
+    spine: &mut Spine,
+    key: u32,
+    split_fn: SplitFn,
+) -> Result<()> {
+    // This loop walks down the spine corresponding to `key`.
+    loop {
+        match read_flags(spine.child().r())? {
+            BTreeFlags::Internal => {
+                let mut child = w_node::<MetadataBlock>(spine.child());
+                patch_parent(spine, 0, child.loc);
+                node_remove_lt(&mut child, key)?;
+
+                let nr_entries = child.keys.len();
+                if nr_entries > 0 {
+                    // Continue with the grandchild
+                    spine.push(child.values.get(0))?;
+                } else {
+                    // Empty node
+                    break;
+                }
+            }
+            BTreeFlags::Leaf => {
+                let mut child = w_node::<LeafV>(spine.child());
+                patch_parent(spine, 0, child.loc);
+                node_remove_lt(&mut child, key)?;
+
+                // The last entry in the leaf may in turn need splitting.
+                if let Some((key_old, value_old)) = child.first() {
+                    let (key_new, value_new) = split_fn(key_old, &value_old);
+                    if key_new != key_old {
+                        child.keys.set(0, &key_new);
+                    }
+                    if value_new != value_old {
+                        child.values.set(0, &value_new);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 //-------------------------------------------------------------------------

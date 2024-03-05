@@ -90,6 +90,14 @@ impl<S: Serializable, Data: Readable> PArray<S, Data> {
         S::unpack(&mut data.r()).unwrap()
     }
 
+    /// Return the first element of the array, if present
+    pub fn first(&self) -> Option<S> {
+        match self.nr_entries {
+            0 => None,
+            _ => Some(self.get(0)),
+        }
+    }
+
     /// Return the last element of the array, if present
     pub fn last(&self) -> Option<S> {
         match self.nr_entries {

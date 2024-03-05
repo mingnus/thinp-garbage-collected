@@ -348,6 +348,17 @@ impl<V: Serializable> BTree<V> {
         Ok(())
     }
 
+    pub fn remove_lt<SplitFn: FnOnce(u32, &V) -> (u32, V)>(
+        &mut self,
+        key: u32,
+        split_fn: SplitFn,
+    ) -> Result<()> {
+        let mut spine = self.mk_spine()?;
+        remove::remove_lt(&mut spine, key, split_fn)?;
+        self.root = spine.get_root();
+        Ok(())
+    }
+
     //-------------------------------
 
     /// Returns a vec of key, value pairs
@@ -848,6 +859,18 @@ mod test {
         Ok(())
     }
 
+    #[test]
+    fn remove_lt_empty() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        fix.commit()?;
+
+        let no_split = |k: u32, v: &Value| (k, *v);
+
+        fix.tree.remove_lt(100, no_split)?;
+        ensure!(fix.tree.check()? == 0);
+        Ok(())
+    }
+
     fn build_tree(fix: &mut Fixture, count: u32) -> Result<()> {
         fix.commit()?;
 
@@ -865,8 +888,26 @@ mod test {
 
         let mut c = fix.tree.cursor(0)?;
 
-        // Check all entries are below 50
+        // Check all entries are below `cut`
         for i in 0..cut {
+            let (k, v) = c.get()?.unwrap();
+            ensure!(k == i);
+            ensure!(v.v == i * 3);
+            c.next_entry()?;
+        }
+
+        Ok(())
+    }
+
+    fn remove_lt_and_verify(fix: &mut Fixture, count: u32, cut: u32) -> Result<()> {
+        let no_split = |k: u32, v: &Value| (k, *v);
+        fix.tree.remove_lt(cut, no_split)?;
+        ensure!(fix.tree.check()? == count - cut);
+
+        let mut c = fix.tree.cursor(0)?;
+
+        // Check all entries are above `cut`
+        for i in cut..count {
             let (k, v) = c.get()?.unwrap();
             ensure!(k == i);
             ensure!(v.v == i * 3);
@@ -884,11 +925,20 @@ mod test {
     }
 
     #[test]
+    fn remove_lt_small() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        let count = 100;
+        build_tree(&mut fix, count)?;
+        remove_lt_and_verify(&mut fix, count, 50)
+    }
+
+    #[test]
     fn remove_geq_large() -> Result<()> {
         let mut fix = Fixture::new(1024, 102400)?;
         let nr_entries = 10_000;
         build_tree(&mut fix, nr_entries)?;
 
+        // FIXME: if this is too high we run out of space I think
         let nr_loops = 50;
 
         for i in 0..nr_loops {
@@ -904,6 +954,26 @@ mod test {
         Ok(())
     }
 
+    #[test]
+    fn remove_lt_large() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+        let nr_entries = 10_000;
+        build_tree(&mut fix, nr_entries)?;
+
+        let nr_loops = 50;
+
+        for i in 0..nr_loops {
+            eprintln!("loop {}", i);
+            let scopes = fix.tm.scopes();
+            let mut scopes = scopes.lock().unwrap();
+            let scope = scopes.new_scope();
+            let mut fix = fix.clone(ReferenceContext::Scoped(scope.id));
+            let cut = rand::thread_rng().gen_range(0..nr_entries);
+            remove_lt_and_verify(&mut fix, nr_entries, cut)?;
+        }
+
+        Ok(())
+    }
     #[test]
     fn remove_geq_split() -> Result<()> {
         let mut fix = Fixture::new(1024, 102400)?;
@@ -928,6 +998,34 @@ mod test {
 
         ensure!(fix.tree.check()? == 1);
         ensure!(fix.tree.lookup(100)?.unwrap() == Value { v: 200, len: 50 });
+
+        Ok(())
+    }
+
+    #[test]
+    fn remove_lt_split() -> Result<()> {
+        let mut fix = Fixture::new(1024, 102400)?;
+
+        let cut = 150;
+        let split = |k: u32, v: &Value| {
+            if k < cut && k + v.len >= cut {
+                (
+                    cut,
+                    Value {
+                        v: v.v,
+                        len: (k + v.len) - cut,
+                    },
+                )
+            } else {
+                (k, *v)
+            }
+        };
+
+        fix.insert(100, &Value { v: 200, len: 100 })?;
+        fix.tree.remove_lt(150, split)?;
+
+        ensure!(fix.tree.check()? == 1);
+        ensure!(fix.tree.lookup(150)?.unwrap() == Value { v: 200, len: 50 });
 
         Ok(())
     }
