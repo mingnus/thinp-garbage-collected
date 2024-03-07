@@ -8,9 +8,9 @@ use crate::block_kinds::*;
 use crate::btree::insert;
 use crate::btree::node::*;
 use crate::btree::remove;
+use crate::btree::spine::*;
 use crate::byte_types::*;
 use crate::packed_array::*;
-use crate::spine::*;
 use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------

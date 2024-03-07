@@ -1,13 +1,11 @@
 use anyhow::{ensure, Result};
-use std::sync::Arc;
 
 use crate::block_cache::*;
 use crate::block_kinds::*;
 use crate::btree::node::*;
+use crate::btree::spine::*;
 use crate::byte_types::*;
 use crate::packed_array::*;
-use crate::spine::*;
-use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
 
@@ -254,7 +252,7 @@ fn rebalance_children<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Resul
         ensure!(spine.is_top());
 
         let gc_loc = child.values.get(0);
-        spine.replace_child_loc(gc_loc)?;
+        spine.replace_child_loc(0, gc_loc)?;
     } else {
         let idx = child.keys.bsearch(&key);
         if idx < 0 {
@@ -312,7 +310,7 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
 
             // We know the key is present or else rebalance_children would have failed.
             // FIXME: check this
-            spine.push(child.values.get(idx as usize))?;
+            spine.push(idx as usize, child.values.get(idx as usize))?;
         } else {
             let mut child = w_node::<LeafV>(spine.child());
             patch_parent(spine, idx as usize, child.loc);
@@ -397,7 +395,7 @@ where
 
                 if let Some(idx) = internal_fn(&mut child)? {
                     parent_idx = idx;
-                    spine.push(child.values.get(parent_idx))?;
+                    spine.push(parent_idx, child.values.get(parent_idx))?;
                 } else {
                     break;
                 }
