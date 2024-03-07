@@ -1,4 +1,5 @@
 use anyhow::{ensure, Result};
+use std::sync::Arc;
 
 use crate::block_cache::*;
 use crate::block_kinds::*;
@@ -6,6 +7,7 @@ use crate::btree::node::*;
 use crate::byte_types::*;
 use crate::packed_array::*;
 use crate::spine::*;
+use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
 
@@ -332,6 +334,86 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
 
 //----------------
 
+/// Traverses the spine of a B-tree, applying specific functions to internal and leaf nodes.
+///
+/// This function walks down the spine of a B-tree, starting from the root node and moving towards
+/// the leaves based on the indices returned by `internal_fn`. At each internal node, `internal_fn`
+/// is called, which can perform arbitrary operations and decide the next child to descend into by
+/// returning an `Option<usize>`. If `internal_fn` returns `None`, the traversal stops early.
+/// When a leaf node is encountered, `leaf_fn` is called to perform operations on the leaf.
+///
+/// # Parameters
+///
+/// - `spine`: A mutable reference to the `Spine` of the B-tree. The `Spine` should provide access
+///   to the current node being visited and allow navigation to child nodes.
+/// - `internal_fn`: A function applied to each visited internal node. It receives a mutable
+///   reference to the internal node and returns a `Result<Option<usize>>`. The `usize` value
+///   represents the index of the child node to visit next. Returning `None` stops the traversal.
+/// - `leaf_fn`: A function applied once to the first leaf node encountered during the traversal.
+///   It receives a mutable reference to the leaf node. Since it's a `FnOnce`, it can capture and
+///   consume variables from its enclosing scope.
+///
+/// # Returns
+///
+/// A `Result<()>` indicating the success or failure of the traversal. Errors can originate from
+/// any of the operations performed within `internal_fn` or `leaf_fn`, or from the underlying B-tree
+/// navigation functions.
+///
+/// # Examples
+///
+/// ```ignore
+/// let mut spine = // ... obtain spine from your B-tree structure ...
+/// walk_spine(&mut spine, |internal_node| {
+///     // Perform operations on the internal node...
+///     Ok(Some(next_child_index))
+/// }, |leaf_node| {
+///     // Perform operations on the leaf node...
+///     Ok(())
+/// }).expect("Failed to walk the spine");
+/// ```
+///
+/// # Note
+///
+/// This function assumes that the B-tree and the provided functions maintain the invariants
+/// necessary for safe traversal and modification. It is the caller's responsibility to ensure
+/// that these invariants are upheld.
+fn walk_spine<LeafV, InternalFn, LeafFn>(
+    spine: &mut Spine,
+    internal_fn: InternalFn,
+    leaf_fn: LeafFn,
+) -> Result<()>
+where
+    LeafV: Serializable,
+    InternalFn: Fn(&mut Node<MetadataBlock, WriteProxy>) -> Result<Option<usize>>, // returns index
+    LeafFn: FnOnce(&mut Node<LeafV, WriteProxy>) -> Result<()>,
+{
+    let mut parent_idx = 0;
+
+    loop {
+        match read_flags(spine.child().r())? {
+            BTreeFlags::Internal => {
+                let mut child = w_node::<MetadataBlock>(spine.child());
+                patch_parent(spine, parent_idx, child.loc);
+
+                if let Some(idx) = internal_fn(&mut child)? {
+                    parent_idx = idx;
+                    spine.push(child.values.get(parent_idx))?;
+                } else {
+                    break;
+                }
+            }
+            BTreeFlags::Leaf => {
+                let mut child = w_node::<LeafV>(spine.child());
+                patch_parent(spine, parent_idx, child.loc);
+                leaf_fn(&mut child)?;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Remove all entries from a node with key >= `key`
 fn node_remove_geq<V: Serializable>(child: &mut Node<V, WriteProxy>, key: u32) -> Result<()> {
     let nr_entries = child.nr_entries.get() as usize;
@@ -377,48 +459,37 @@ pub fn remove_geq<LeafV: Serializable, SplitFn: FnOnce(u32, &LeafV) -> (u32, Lea
     key: u32,
     split_fn: SplitFn,
 ) -> Result<()> {
-    let mut parent_idx = 0;
+    let internal_fn = |child: &mut Node<MetadataBlock, WriteProxy>| {
+        node_remove_geq(child, key)?;
 
-    // This loop walks down the spine corresponding to `key`.
-    loop {
-        match read_flags(spine.child().r())? {
-            BTreeFlags::Internal => {
-                let mut child = w_node::<MetadataBlock>(spine.child());
-                patch_parent(spine, parent_idx, child.loc);
-                node_remove_geq(&mut child, key)?;
+        // Continue with the right most entry.
+        let nr_entries = child.keys.len();
+        if nr_entries > 0 {
+            Ok(Some(nr_entries - 1))
+        } else {
+            Ok(None)
+        }
+    };
 
-                let nr_entries = child.keys.len();
-                if nr_entries > 0 {
-                    // Continue with the grandchild
-                    parent_idx = nr_entries - 1;
-                    spine.push(child.values.get(parent_idx))?;
-                } else {
-                    // Empty node
-                    break;
-                }
+    let leaf_fn = |child: &mut Node<LeafV, WriteProxy>| {
+        node_remove_geq(child, key)?;
+
+        // The last entry in the leaf may need adjusting.
+        if let Some((key_old, value_old)) = child.last() {
+            let idx = child.keys.len() - 1;
+            let (key_new, value_new) = split_fn(key_old, &value_old);
+            if key_new != key_old {
+                child.keys.set(idx, &key_new);
             }
-            BTreeFlags::Leaf => {
-                let mut child = w_node::<LeafV>(spine.child());
-                patch_parent(spine, parent_idx, child.loc);
-                node_remove_geq(&mut child, key)?;
-
-                // The last entry in the leaf may in turn need splitting.
-                if let Some((key_old, value_old)) = child.last() {
-                    let idx = child.keys.len() - 1;
-                    let (key_new, value_new) = split_fn(key_old, &value_old);
-                    if key_new != key_old {
-                        child.keys.set(idx, &key_new);
-                    }
-                    if value_new != value_old {
-                        child.values.set(idx, &value_new);
-                    }
-                }
-                break;
+            if value_new != value_old {
+                child.values.set(idx, &value_new);
             }
         }
-    }
 
-    Ok(())
+        Ok(())
+    };
+
+    walk_spine(spine, internal_fn, leaf_fn)
 }
 
 //----------------
@@ -460,44 +531,92 @@ pub fn remove_lt<LeafV: Serializable, SplitFn: FnOnce(u32, &LeafV) -> (u32, Leaf
     key: u32,
     split_fn: SplitFn,
 ) -> Result<()> {
-    // This loop walks down the spine corresponding to `key`.
-    loop {
-        match read_flags(spine.child().r())? {
-            BTreeFlags::Internal => {
-                let mut child = w_node::<MetadataBlock>(spine.child());
-                patch_parent(spine, 0, child.loc);
-                node_remove_lt(&mut child, key)?;
+    let internal_fn = |child: &mut Node<MetadataBlock, WriteProxy>| {
+        node_remove_lt(child, key)?;
 
-                let nr_entries = child.keys.len();
-                if nr_entries > 0 {
-                    // Continue with the grandchild
-                    spine.push(child.values.get(0))?;
-                } else {
-                    // Empty node
-                    break;
-                }
+        let nr_entries = child.keys.len();
+        if nr_entries > 0 {
+            Ok(Some(0))
+        } else {
+            Ok(None)
+        }
+    };
+
+    let leaf_fn = |child: &mut Node<LeafV, WriteProxy>| {
+        node_remove_lt(child, key)?;
+
+        // The first entry in the leaf may need adjusting.
+        if let Some((key_old, value_old)) = child.first() {
+            let (key_new, value_new) = split_fn(key_old, &value_old);
+            if key_new != key_old {
+                child.keys.set(0, &key_new);
+            }
+            if value_new != value_old {
+                child.values.set(0, &value_new);
+            }
+        }
+
+        Ok(())
+    };
+
+    walk_spine(spine, internal_fn, leaf_fn)
+}
+
+//------------------
+
+/*
+// Returns a vec of blocks starting with the root, and always taking the leftmost child.
+fn leftmost_spine<LeafV: Serializable>(
+    tm: &Arc<TransactionManager>,
+    root: MetadataBlock,
+) -> Result<Vec<MetadataBlock>> {
+    let mut results = Vec::new();
+    let mut b = root;
+
+    loop {
+        results.push(b);
+        let block = tm.read(b, &BNODE_KIND)?;
+
+        match read_flags(block.r())? {
+            BTreeFlags::Internal => {
+                let child = r_node::<MetadataBlock>(block);
+                b = child.first().unwrap().1;
             }
             BTreeFlags::Leaf => {
-                let mut child = w_node::<LeafV>(spine.child());
-                patch_parent(spine, 0, child.loc);
-                node_remove_lt(&mut child, key)?;
-
-                // The last entry in the leaf may in turn need splitting.
-                if let Some((key_old, value_old)) = child.first() {
-                    let (key_new, value_new) = split_fn(key_old, &value_old);
-                    if key_new != key_old {
-                        child.keys.set(0, &key_new);
-                    }
-                    if value_new != value_old {
-                        child.values.set(0, &value_new);
-                    }
-                }
                 break;
             }
         }
     }
 
+    Ok(results)
+}
+
+// Walk the spine down the rightmost entries.
+fn rightmost_spine<LeafV: Serializable>(spine: &mut Spine) -> Result<()> {
+    while read_flags(spine.child().r())? == BTreeFlags::Internal {
+        let child = w_node::<MetadataBlock>(spine.child());
+        spine.push(child.last().unwrap().1)?;
+    }
+
     Ok(())
 }
+
+pub fn merge<LeafV: Serializable>(spine: &mut Spine, right_root: MetadataBlock) -> Result<()> {
+
+    let mut parent_index = 0;
+
+    loop {
+        match read_flags(spine.child().r())? {
+            BTreeFlags::Internal => {
+                let mut child = w_node::<MetadataBlock>(spine.child());
+                patch_parent(spine, parent_index, child.loc);
+            }
+            BTreeFlags::Leaf => {}
+        }
+    }
+
+    Ok(())
+}
+*/
 
 //-------------------------------------------------------------------------
