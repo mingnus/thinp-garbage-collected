@@ -84,7 +84,7 @@ fn rebalance2_aux<V: Serializable>(
 }
 
 fn rebalance2<LeafV: Serializable>(spine: &mut Spine, left_idx: usize) -> Result<()> {
-    let mut parent = w_node::<MetadataBlock>(spine.child());
+    let mut parent = spine.child_node::<MetadataBlock>();
 
     let left_loc = parent.values.get(left_idx);
     if is_leaf(spine, left_loc)? {
@@ -231,7 +231,7 @@ fn rebalance3_aux<V: Serializable>(
 
 // Assumes spine.child() is an internal node
 fn rebalance3<LeafV: Serializable>(spine: &mut Spine, left_idx: usize) -> Result<()> {
-    let mut parent = w_node::<MetadataBlock>(spine.child());
+    let mut parent = spine.child_node::<MetadataBlock>();
 
     let left_loc = parent.values.get(left_idx);
     if is_leaf(spine, left_loc)? {
@@ -244,7 +244,7 @@ fn rebalance3<LeafV: Serializable>(spine: &mut Spine, left_idx: usize) -> Result
 // Assumes spine.child() is an internal node
 fn rebalance_children<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
     eprintln!("rebalance_children");
-    let child = w_node::<MetadataBlock>(spine.child());
+    let child = spine.child_node::<MetadataBlock>();
 
     if child.nr_entries.get() == 1 {
         // The only node that's allowed to drop below 1/3 full is the root
@@ -290,7 +290,7 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
 
         if flags == BTreeFlags::Internal {
             let old_loc = spine.child_loc();
-            let child = w_node::<MetadataBlock>(spine.child());
+            let child = spine.child_node::<MetadataBlock>();
             patch_parent(spine, idx as usize, child.loc);
 
             drop(child);
@@ -305,14 +305,14 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
 
             // Reaquire the child because it may have changed due to the
             // rebalance.
-            let child = w_node::<MetadataBlock>(spine.child());
+            let child = spine.child_node::<MetadataBlock>();
             idx = child.keys.bsearch(&key);
 
             // We know the key is present or else rebalance_children would have failed.
             // FIXME: check this
             spine.push(idx as usize, child.values.get(idx as usize))?;
         } else {
-            let mut child = w_node::<LeafV>(spine.child());
+            let mut child = spine.child_node::<LeafV>();
             patch_parent(spine, idx as usize, child.loc);
 
             let idx = child.keys.bsearch(&key);
@@ -390,7 +390,7 @@ where
     loop {
         match read_flags(spine.child().r())? {
             BTreeFlags::Internal => {
-                let mut child = w_node::<MetadataBlock>(spine.child());
+                let mut child = spine.child_node::<MetadataBlock>();
                 patch_parent(spine, parent_idx, child.loc);
 
                 if let Some(idx) = internal_fn(&mut child)? {
@@ -401,7 +401,7 @@ where
                 }
             }
             BTreeFlags::Leaf => {
-                let mut child = w_node::<LeafV>(spine.child());
+                let mut child = spine.child_node::<LeafV>();
                 patch_parent(spine, parent_idx, child.loc);
                 leaf_fn(&mut child)?;
                 break;

@@ -89,7 +89,7 @@ fn has_space_for_insert<NV: Serializable, Data: Readable>(node: &Node<NV, Data>)
 }
 
 fn split_beneath<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let mut new_parent = w_node::<NV>(spine.child());
+    let mut new_parent = spine.child_node::<NV>();
     let nr_left = (new_parent.nr_entries.get() / 2) as usize;
     let (lkeys, lvalues) = new_parent.shift_left(nr_left);
     let (rkeys, rvalues) = new_parent.shift_left(new_parent.nr_entries.get() as usize);
@@ -101,7 +101,7 @@ fn split_beneath<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
     right.append(&rkeys, &rvalues);
 
     // setup the parent to point to the two new children
-    let mut new_parent = w_node::<MetadataBlock>(spine.child());
+    let mut new_parent = spine.child_node::<MetadataBlock>();
     new_parent.flags.set(BTreeFlags::Internal as u32);
     assert!(new_parent.keys.is_empty());
     assert!(new_parent.values.is_empty());
@@ -128,7 +128,7 @@ fn rebalance_left<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
     let left_loc = parent.values.get(parent_idx - 1);
     let left_block = spine.shadow(left_loc)?;
     let mut left = w_node::<V>(left_block.clone());
-    let mut right = w_node::<V>(spine.child());
+    let mut right = spine.child_node::<V>();
     redistribute2(&mut left, &mut right);
 
     // Adjust the parent keys
@@ -149,7 +149,7 @@ fn rebalance_right<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
     let right_loc = parent.values.get(parent_idx + 1);
     let right_block = spine.shadow(right_loc)?;
     let mut right = w_node::<V>(right_block.clone());
-    let mut left = w_node::<V>(spine.child());
+    let mut left = spine.child_node::<V>();
     redistribute2(&mut left, &mut right);
 
     // Adjust the parent keys
@@ -175,7 +175,7 @@ fn get_loc_free_space<V: Serializable>(tm: &TransactionManager, loc: u32) -> usi
 }
 
 fn split_into_two<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let mut left = w_node::<V>(spine.child());
+    let mut left = spine.child_node::<V>();
     let right_block = spine.new_block()?;
     let mut right = init_node(right_block.clone(), left.is_leaf())?;
     redistribute2(&mut left, &mut right);
@@ -203,7 +203,7 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
 
     if parent_index == 0 {
         // There is no left sibling, so we rebalance 0, 1, 2
-        let mut left = w_node::<V>(spine.child());
+        let mut left = spine.child_node::<V>();
         let right_block = spine.shadow(parent.values.get(1))?;
         let mut right = w_node(right_block.clone());
 
@@ -227,8 +227,7 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
     } else {
         let left_block = spine.shadow(parent.values.get(parent_index - 1))?;
         let mut left = w_node::<V>(left_block.clone());
-        let right_block = spine.child();
-        let mut right = w_node::<V>(right_block);
+        let mut right = spine.child_node::<V>();
 
         let middle_block = spine.new_block()?;
         let mut middle = init_node(middle_block.clone(), left.is_leaf())?;
@@ -291,7 +290,7 @@ fn rebalance_or_split<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()
 }
 
 fn ensure_space<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<WNode<NV>> {
-    let mut child = w_node::<NV>(spine.child());
+    let mut child = spine.child_node::<NV>();
 
     if !has_space_for_insert::<NV, WriteProxy>(&child) {
         if spine.is_top() {
@@ -300,7 +299,7 @@ fn ensure_space<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<WNode<N
             rebalance_or_split::<NV>(spine, key)?;
         }
 
-        child = w_node(spine.child());
+        child = spine.child_node();
     }
 
     Ok(child)
@@ -374,7 +373,7 @@ pub fn overwrite<V: Serializable>(
         let flags = read_flags(spine.child().r())?;
 
         if flags == BTreeFlags::Internal {
-            let mut child = w_node::<u32>(spine.child());
+            let mut child = spine.child_node::<u32>();
 
             idx = child.keys.bsearch(&new_key);
             if idx < 0 {
@@ -390,7 +389,7 @@ pub fn overwrite<V: Serializable>(
             let mut p = w_node::<u32>(spine.parent());
             p.values.set(idx as usize, &loc);
         } else {
-            let mut child = w_node::<V>(spine.child());
+            let mut child = spine.child_node::<V>();
 
             idx = child.keys.bsearch(&old_key);
 

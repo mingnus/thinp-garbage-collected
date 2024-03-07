@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use crate::block_cache::*;
 use crate::block_kinds::*;
+use crate::btree::node::*;
+use crate::packed_array::*;
 use crate::transaction_manager::*;
 
 //-------------------------------------------------------------------------
@@ -94,6 +96,10 @@ impl Spine {
         self.nodes.last_mut().unwrap().block.clone()
     }
 
+    pub fn child_node<LeafV: Serializable>(&mut self) -> Node<LeafV, WriteProxy> {
+        w_node(self.child())
+    }
+
     pub fn child_loc(&self) -> MetadataBlock {
         self.nodes.last().unwrap().block.loc()
     }
@@ -106,6 +112,7 @@ impl Spine {
         self.nodes[self.nodes.len() - 2].block.clone()
     }
 
+    // FIXME: do we need this now that the spine patches the parent entries?
     pub fn parent_index(&self) -> Option<usize> {
         self.nodes.last().unwrap().parent_index
     }
