@@ -454,11 +454,11 @@ fn node_remove_geq<V: Serializable>(child: &mut Node<V, WriteProxy>, key: u32) -
 /// Removes all entries in the btree that are >= `key`.  This can leave empty nodes which
 /// will need to be corrected when the two halves are zipped up.
 /// The split function is used to trim the new last entry in the tree.
-pub fn remove_geq<LeafV: Serializable, SplitFn: FnOnce(u32, &LeafV) -> (u32, LeafV)>(
-    spine: &mut Spine,
-    key: u32,
-    split_fn: SplitFn,
-) -> Result<()> {
+pub fn remove_geq<LeafV, SplitFn>(spine: &mut Spine, key: u32, split_fn: SplitFn) -> Result<()>
+where
+    LeafV: Serializable,
+    SplitFn: FnOnce(u32, &LeafV) -> (u32, LeafV),
+{
     let internal_fn = |child: &mut Node<MetadataBlock, WriteProxy>| {
         node_remove_geq(child, key)?;
 
@@ -526,11 +526,11 @@ fn node_remove_lt<V: Serializable>(child: &mut Node<V, WriteProxy>, key: u32) ->
     Ok(())
 }
 
-pub fn remove_lt<LeafV: Serializable, SplitFn: FnOnce(u32, &LeafV) -> (u32, LeafV)>(
-    spine: &mut Spine,
-    key: u32,
-    split_fn: SplitFn,
-) -> Result<()> {
+pub fn remove_lt<LeafV, SplitFn>(spine: &mut Spine, key: u32, split_fn: SplitFn) -> Result<()>
+where
+    LeafV: Serializable,
+    SplitFn: FnOnce(u32, &LeafV) -> (u32, LeafV),
+{
     let internal_fn = |child: &mut Node<MetadataBlock, WriteProxy>| {
         node_remove_lt(child, key)?;
 
