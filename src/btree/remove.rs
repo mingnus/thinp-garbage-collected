@@ -243,7 +243,6 @@ fn rebalance3<LeafV: Serializable>(spine: &mut Spine, left_idx: usize) -> Result
 
 // Assumes spine.child() is an internal node
 fn rebalance_children<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    eprintln!("rebalance_children");
     let child = spine.child_node::<MetadataBlock>();
 
     if child.nr_entries.get() == 1 {
@@ -252,7 +251,7 @@ fn rebalance_children<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Resul
         ensure!(spine.is_top());
 
         let gc_loc = child.values.get(0);
-        spine.replace_child_loc(0, gc_loc)?;
+        spine.replace_root(0, gc_loc)?;
     } else {
         let idx = child.keys.bsearch(&key);
         if idx < 0 {

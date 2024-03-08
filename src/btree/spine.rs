@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, ensure, Result};
 use std::sync::Arc;
 
 use crate::block_cache::*;
@@ -74,7 +74,8 @@ impl Spine {
         }
     }
 
-    pub fn replace_child_loc(&mut self, parent_index: usize, loc: MetadataBlock) -> Result<()> {
+    pub fn replace_root(&mut self, parent_index: usize, loc: MetadataBlock) -> Result<()> {
+        ensure!(self.is_top());
         let block = self.shadow(loc)?;
         self.replace_child(parent_index, block);
         Ok(())
