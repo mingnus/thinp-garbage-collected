@@ -123,4 +123,12 @@ impl Spine {
     }
 }
 
+// FIXME: this should be done automatically by the spine
+pub fn patch_parent(spine: &mut Spine, parent_idx: usize, loc: MetadataBlock) {
+    if !spine.is_top() {
+        let mut parent = w_node::<MetadataBlock>(spine.parent());
+        parent.values.set(parent_idx, &loc);
+    }
+}
+
 //-------------------------------------------------------------------------

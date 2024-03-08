@@ -274,13 +274,6 @@ fn rebalance_children<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Resul
     Ok(())
 }
 
-fn patch_parent(spine: &mut Spine, parent_idx: usize, loc: MetadataBlock) {
-    if !spine.is_top() {
-        let mut parent = w_node::<MetadataBlock>(spine.parent());
-        parent.values.set(parent_idx, &loc);
-    }
-}
-
 pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option<LeafV>> {
     let mut idx = 0isize;
 
