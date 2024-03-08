@@ -123,43 +123,57 @@ fn split_beneath<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
 }
 
 fn rebalance_left<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let mut parent = w_node(spine.parent());
-    let parent_idx = spine.parent_index().unwrap();
-    let left_loc = parent.values.get(parent_idx - 1);
-    let left_block = spine.shadow(left_loc)?;
-    let mut left = w_node::<V>(left_block.clone());
-    let mut right = spine.child_node::<V>();
-    redistribute2(&mut left, &mut right);
+    let (parent_index, loc) = {
+        let mut parent = w_node(spine.parent());
+        let parent_idx = spine.parent_index().unwrap();
+        let left_loc = parent.values.get(parent_idx - 1);
+        let left_block = spine.shadow(left_loc)?;
+        let mut left = w_node::<V>(left_block.clone());
+        let mut right = spine.child_node::<V>();
+        redistribute2(&mut left, &mut right);
 
-    // Adjust the parent keys
-    let first_key = right.first_key().unwrap();
-    parent.keys.set(parent_idx, &first_key);
+        // Adjust the parent keys
+        let first_key = right.first_key().unwrap();
+        parent.keys.set(parent_idx, &first_key);
 
-    // Choose the correct child in the spine
-    if key < first_key {
-        spine.replace_child(parent_idx, left_block);
-    }
+        // Choose the correct child in the spine
+        if key < first_key {
+            (parent_idx, left.loc)
+        } else {
+            (parent_idx, right.loc)
+        }
+    };
+
+    spine.pop()?;
+    spine.push(parent_index, loc)?;
 
     Ok(())
 }
 
 fn rebalance_right<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let mut parent = w_node(spine.parent());
-    let parent_idx = spine.parent_index().unwrap();
-    let right_loc = parent.values.get(parent_idx + 1);
-    let right_block = spine.shadow(right_loc)?;
-    let mut right = w_node::<V>(right_block.clone());
-    let mut left = spine.child_node::<V>();
-    redistribute2(&mut left, &mut right);
+    let (parent_index, loc) = {
+        let mut parent = w_node(spine.parent());
+        let parent_idx = spine.parent_index().unwrap();
+        let right_loc = parent.values.get(parent_idx + 1);
+        let right_block = spine.shadow(right_loc)?;
+        let mut right = w_node::<V>(right_block.clone());
+        let mut left = spine.child_node::<V>();
+        redistribute2(&mut left, &mut right);
 
-    // Adjust the parent keys
-    let first_key = right.first_key().unwrap();
-    parent.keys.set(parent_idx + 1, &first_key);
+        // Adjust the parent keys
+        let first_key = right.first_key().unwrap();
+        parent.keys.set(parent_idx + 1, &first_key);
 
-    // Choose the correct child in the spine
-    if key >= first_key {
-        spine.replace_child(parent_idx + 1, right_block);
-    }
+        // Choose the correct child in the spine
+        if key >= first_key {
+            (parent_idx + 1, right.loc)
+        } else {
+            (parent_idx, left.loc)
+        }
+    };
+
+    spine.pop()?;
+    spine.push(parent_index, loc)?;
 
     Ok(())
 }
@@ -175,24 +189,31 @@ fn get_loc_free_space<V: Serializable>(tm: &TransactionManager, loc: u32) -> usi
 }
 
 fn split_into_two<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let mut left = spine.child_node::<V>();
-    let right_block = spine.new_block()?;
-    let mut right = init_node(right_block.clone(), left.is_leaf())?;
-    redistribute2(&mut left, &mut right);
+    let (parent_index, loc) = {
+        let mut left = spine.child_node::<V>();
+        let right_block = spine.new_block()?;
+        let mut right = init_node(right_block.clone(), left.is_leaf())?;
+        redistribute2(&mut left, &mut right);
 
-    // Adjust the parent keys
-    let mut parent = w_node(spine.parent());
-    let parent_index = spine.parent_index().unwrap();
+        // Adjust the parent keys
+        let mut parent = w_node(spine.parent());
+        let parent_index = spine.parent_index().unwrap();
 
-    let first_key = right.first_key().unwrap();
-    parent.keys.insert_at(parent_index + 1, &first_key);
-    parent.values.insert_at(parent_index + 1, &right.loc);
-    parent.nr_entries.inc(1);
+        let first_key = right.first_key().unwrap();
+        parent.keys.insert_at(parent_index + 1, &first_key);
+        parent.values.insert_at(parent_index + 1, &right.loc);
+        parent.nr_entries.inc(1);
 
-    // Choose the correct child in the spine
-    if key >= first_key {
-        spine.replace_child(parent_index + 1, right_block);
-    }
+        // Choose the correct child in the spine
+        if key >= first_key {
+            (parent_index + 1, right.loc)
+        } else {
+            (parent_index, left.loc)
+        }
+    };
+
+    spine.pop()?;
+    spine.push(parent_index, loc)?;
 
     Ok(())
 }
@@ -201,7 +222,7 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
     let mut parent = w_node::<u32>(spine.parent());
     let parent_index = spine.parent_index().unwrap();
 
-    if parent_index == 0 {
+    let (parent_index, loc) = if parent_index == 0 {
         // There is no left sibling, so we rebalance 0, 1, 2
         let mut left = spine.child_node::<V>();
         let right_block = spine.shadow(parent.values.get(1))?;
@@ -220,9 +241,11 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
         parent.insert_at(1, m_first_key, &middle.loc);
 
         if key >= r_first_key {
-            spine.replace_child(parent_index + 2, right_block);
+            (parent_index + 2, right.loc)
         } else if key >= m_first_key {
-            spine.replace_child(parent_index + 1, middle_block);
+            (parent_index + 1, middle.loc)
+        } else {
+            (parent_index, left.loc)
         }
     } else {
         let left_block = spine.shadow(parent.values.get(parent_index - 1))?;
@@ -242,14 +265,17 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
         parent.insert_at(parent_index, m_first_key, &middle.loc);
 
         if key < m_first_key {
-            spine.replace_child(parent_index - 1, left_block);
+            (parent_index - 1, left.loc)
         } else if key < r_first_key {
-            spine.replace_child(parent_index, middle_block);
+            (parent_index, middle.loc)
         } else {
-            let right_block = spine.child();
-            spine.replace_child(parent_index + 1, right_block);
+            (parent_index + 1, right.loc)
         }
-    }
+    };
+
+    drop(parent);
+    spine.pop()?;
+    spine.push(parent_index, loc)?;
 
     Ok(())
 }
@@ -280,6 +306,7 @@ fn rebalance_or_split<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()
     }
 
     // We didn't manage to rebalance, so we need to split
+    drop(parent);
     if parent_index == 0 || parent_index == nr_parent - 1 {
         // When inserting a sequence that is either monotonically
         // increasing or decreasing, it's better to split a single node into two.
@@ -293,6 +320,7 @@ fn ensure_space<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<WNode<N
     let mut child = spine.child_node::<NV>();
 
     if !has_space_for_insert::<NV, WriteProxy>(&child) {
+        drop(child);
         if spine.is_top() {
             split_beneath::<NV>(spine, key)?;
         } else {

@@ -65,7 +65,7 @@ impl Spine {
         Ok(())
     }
 
-    pub fn replace_child(&mut self, parent_index: usize, block: WriteProxy) {
+    fn replace_child(&mut self, parent_index: usize, block: WriteProxy) {
         if let Some(last) = self.nodes.last_mut() {
             *last = Frame {
                 parent_index: Some(parent_index),
