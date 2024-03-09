@@ -299,7 +299,7 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
 
             // We know the key is present or else rebalance_children would have failed.
             // FIXME: check this
-            spine.push(idx as usize, child.values.get(idx as usize))?;
+            spine.push(idx as usize)?;
         } else {
             // leaf
             let mut child = spine.child_node::<LeafV>();
@@ -382,7 +382,7 @@ where
 
             if let Some(idx) = internal_fn(&mut child)? {
                 parent_idx = idx;
-                spine.push(parent_idx, child.values.get(parent_idx))?;
+                spine.push(parent_idx)?;
             } else {
                 break;
             }

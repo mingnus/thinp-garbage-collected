@@ -79,7 +79,9 @@ impl Spine {
         child.values.set(parent_idx, &loc);
     }
 
-    pub fn push(&mut self, parent_index: usize, loc: MetadataBlock) -> Result<()> {
+    pub fn push(&mut self, parent_index: usize) -> Result<()> {
+        let parent = self.child_node();
+        let loc = parent.values.get(parent_index);
         let block = self.tm.shadow(self.context, loc, &BNODE_KIND)?;
         self.patch(parent_index, block.loc());
         self.nodes.push(Frame {

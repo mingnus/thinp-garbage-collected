@@ -116,9 +116,9 @@ fn split_beneath<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
     drop(right);
 
     if key < rkeys[0] {
-        spine.push(0, left_loc)?;
+        spine.push(0)?;
     } else {
-        spine.push(1, right_loc)?;
+        spine.push(1)?;
     }
 
     Ok(())
@@ -126,7 +126,7 @@ fn split_beneath<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
 
 #[instrument]
 fn rebalance_left<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let (parent_index, loc) = {
+    let parent_index = {
         let mut parent = w_node(spine.parent());
         let parent_idx = spine.parent_index().unwrap();
         let left_loc = parent.values.get(parent_idx - 1);
@@ -141,21 +141,21 @@ fn rebalance_left<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
 
         // Choose the correct child in the spine
         if key < first_key {
-            (parent_idx - 1, left.loc)
+            parent_idx - 1
         } else {
-            (parent_idx, right.loc)
+            parent_idx
         }
     };
 
     spine.pop()?;
-    spine.push(parent_index, loc)?;
+    spine.push(parent_index)?;
 
     Ok(())
 }
 
 #[instrument]
 fn rebalance_right<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let (parent_index, loc) = {
+    let parent_index = {
         let mut parent = w_node(spine.parent());
         let parent_idx = spine.parent_index().unwrap();
         let right_loc = parent.values.get(parent_idx + 1);
@@ -170,14 +170,14 @@ fn rebalance_right<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
 
         // Choose the correct child in the spine
         if key >= first_key {
-            (parent_idx + 1, right.loc)
+            parent_idx + 1
         } else {
-            (parent_idx, left.loc)
+            parent_idx
         }
     };
 
     spine.pop()?;
-    spine.push(parent_index, loc)?;
+    spine.push(parent_index)?;
 
     Ok(())
 }
@@ -194,7 +194,7 @@ fn get_loc_free_space<V: Serializable>(tm: &TransactionManager, loc: u32) -> usi
 
 #[instrument]
 fn split_into_two<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let (parent_index, loc) = {
+    let parent_index = {
         let mut left = spine.child_node::<V>();
         let right_block = spine.new_block()?;
         let mut right = init_node(right_block.clone(), left.is_leaf())?;
@@ -211,14 +211,14 @@ fn split_into_two<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
 
         // Choose the correct child in the spine
         if key >= first_key {
-            (parent_index + 1, right.loc)
+            parent_index + 1
         } else {
-            (parent_index, left.loc)
+            parent_index
         }
     };
 
     spine.pop()?;
-    spine.push(parent_index, loc)?;
+    spine.push(parent_index)?;
 
     Ok(())
 }
@@ -228,7 +228,8 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
     let mut parent = w_node::<u32>(spine.parent());
     let parent_index = spine.parent_index().unwrap();
 
-    let (parent_index, loc) = if parent_index == 0 {
+    // FIXME: multiple parent indexes
+    let parent_index = if parent_index == 0 {
         // There is no left sibling, so we rebalance 0, 1, 2
         let mut left = spine.child_node::<V>();
         let right_block = spine.shadow(parent.values.get(1))?;
@@ -247,11 +248,11 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
         parent.insert_at(1, m_first_key, &middle.loc);
 
         if key >= r_first_key {
-            (parent_index + 2, right.loc)
+            parent_index + 2
         } else if key >= m_first_key {
-            (parent_index + 1, middle.loc)
+            parent_index + 1
         } else {
-            (parent_index, left.loc)
+            parent_index
         }
     } else {
         let left_block = spine.shadow(parent.values.get(parent_index - 1))?;
@@ -271,17 +272,17 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
         parent.insert_at(parent_index, m_first_key, &middle.loc);
 
         if key < m_first_key {
-            (parent_index - 1, left.loc)
+            parent_index - 1
         } else if key < r_first_key {
-            (parent_index, middle.loc)
+            parent_index
         } else {
-            (parent_index + 1, right.loc)
+            parent_index + 1
         }
     };
 
     drop(parent);
     spine.pop()?;
-    spine.push(parent_index, loc)?;
+    spine.push(parent_index)?;
 
     Ok(())
 }
@@ -357,7 +358,7 @@ pub fn insert<V: Serializable>(spine: &mut Spine, key: u32, value: &V) -> Result
                 idx = 0;
             }
 
-            spine.push(idx as usize, child.values.get(idx as usize))?;
+            spine.push(idx as usize)?;
         } else {
             let mut child = ensure_space::<V>(spine, key)?;
 
@@ -408,7 +409,7 @@ pub fn overwrite<V: Serializable>(
                 idx = 0;
             }
 
-            spine.push(idx as usize, child.values.get(idx as usize))?;
+            spine.push(idx as usize)?;
         } else {
             let mut child = spine.child_node::<V>();
 
