@@ -322,8 +322,8 @@ fn rebalance_or_split<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()
     }
 }
 
-fn ensure_space<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<WNode<NV>> {
-    let mut child = spine.child_node::<NV>();
+fn ensure_space<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
+    let child = spine.child_node::<NV>();
 
     if !has_space_for_insert::<NV, WriteProxy>(&child) {
         drop(child);
@@ -332,11 +332,9 @@ fn ensure_space<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<WNode<N
         } else {
             rebalance_or_split::<NV>(spine, key)?;
         }
-
-        child = spine.child_node();
     }
 
-    Ok(child)
+    Ok(())
 }
 
 pub fn insert<V: Serializable>(spine: &mut Spine, key: u32, value: &V) -> Result<()> {
@@ -344,7 +342,8 @@ pub fn insert<V: Serializable>(spine: &mut Spine, key: u32, value: &V) -> Result
 
     loop {
         if spine.is_internal()? {
-            let mut child = ensure_space::<MetadataBlock>(spine, key)?;
+            ensure_space::<MetadataBlock>(spine, key)?;
+            let mut child = spine.child_node::<MetadataBlock>();
 
             // FIXME: remove, just here whilst hunting a bug
             ensure!(child.nr_entries.get() > 0);
@@ -358,7 +357,8 @@ pub fn insert<V: Serializable>(spine: &mut Spine, key: u32, value: &V) -> Result
 
             spine.push(idx as usize)?;
         } else {
-            let mut child = ensure_space::<V>(spine, key)?;
+            ensure_space::<V>(spine, key)?;
+            let mut child = spine.child_node::<V>();
 
             idx = child.keys.bsearch(&key);
 
