@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 /// However, we do share blocks between different data structures.  We use this
 /// context type to distinguish between data structs to force shadowing once
 /// per struct.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReferenceContext {
     DevTree,     // There is a single dev tree per pool.
     ThinId(u32), // mtrees or btrees are associated with a thin id.

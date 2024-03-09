@@ -283,7 +283,6 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
         if flags == BTreeFlags::Internal {
             let old_loc = spine.child_loc();
             let child = spine.child_node::<MetadataBlock>();
-            patch_parent(spine, idx as usize, child.loc);
 
             drop(child);
             // FIXME: we could pass child in to save re-getting it
@@ -305,7 +304,6 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
             spine.push(idx as usize, child.values.get(idx as usize))?;
         } else {
             let mut child = spine.child_node::<LeafV>();
-            patch_parent(spine, idx as usize, child.loc);
 
             let idx = child.keys.bsearch(&key);
             if idx < 0
@@ -383,7 +381,6 @@ where
         match read_flags(spine.child().r())? {
             BTreeFlags::Internal => {
                 let mut child = spine.child_node::<MetadataBlock>();
-                patch_parent(spine, parent_idx, child.loc);
 
                 if let Some(idx) = internal_fn(&mut child)? {
                     parent_idx = idx;
@@ -394,7 +391,6 @@ where
             }
             BTreeFlags::Leaf => {
                 let mut child = spine.child_node::<LeafV>();
-                patch_parent(spine, parent_idx, child.loc);
                 leaf_fn(&mut child)?;
                 break;
             }

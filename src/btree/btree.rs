@@ -459,7 +459,9 @@ mod test {
     use rand::Rng;
     use std::io::{self, Read, Write};
     use std::sync::{Arc, Mutex};
+    use test_log::test;
     use thinp::io_engine::*;
+    use tracing::{event, instrument, Level};
 
     fn mk_engine(nr_blocks: u32) -> Arc<dyn IoEngine> {
         Arc::new(CoreIoEngine::new(nr_blocks as u64))
@@ -599,7 +601,7 @@ mod test {
         eprintln!("inserting {} keys", keys.len());
         for (i, k) in keys.iter().enumerate() {
             fix.insert(*k, &mk_value(*k * 2))?;
-            if i % 100 == 0 {
+            if i % 1000 == 0 {
                 eprintln!("{}", i);
                 let n = fix.check()?;
                 ensure!(n == i as u32 + 1);

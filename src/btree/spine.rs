@@ -1,4 +1,5 @@
 use anyhow::{anyhow, ensure, Result};
+use std::fmt;
 use std::sync::Arc;
 
 use crate::block_cache::*;
@@ -20,6 +21,22 @@ pub struct Spine {
     pub tm: Arc<TransactionManager>, // FIXME: stop this being public
     context: ReferenceContext,
     nodes: Vec<Frame>,
+}
+
+impl fmt::Debug for Spine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Spine")
+            .field("context", &self.context)
+            .field(
+                "frames",
+                &self
+                    .nodes
+                    .iter()
+                    .map(|frame| (frame.parent_index, frame.block.loc()))
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl Spine {
@@ -47,8 +64,14 @@ impl Spine {
         self.nodes.len() == 1
     }
 
+    fn patch(&mut self, parent_idx: usize, loc: MetadataBlock) {
+        let mut child = w_node::<MetadataBlock>(self.child());
+        child.values.set(parent_idx, &loc);
+    }
+
     pub fn push(&mut self, parent_index: usize, loc: MetadataBlock) -> Result<()> {
         let block = self.tm.shadow(self.context, loc, &BNODE_KIND)?;
+        self.patch(parent_index, block.loc());
         self.nodes.push(Frame {
             parent_index: Some(parent_index),
             block,
@@ -120,14 +143,6 @@ impl Spine {
 
     pub fn new_block(&self) -> Result<WriteProxy> {
         self.tm.new_block(self.context, &BNODE_KIND)
-    }
-}
-
-// FIXME: this should be done automatically by the spine
-pub fn patch_parent(spine: &mut Spine, parent_idx: usize, loc: MetadataBlock) {
-    if !spine.is_top() {
-        let mut parent = w_node::<MetadataBlock>(spine.parent());
-        parent.values.set(parent_idx, &loc);
     }
 }
 

@@ -17,7 +17,7 @@ fn main() -> Result<()> {
         .with_max_level(Level::TRACE)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting defualt subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     const SUPERBLOCK_LOCATION: u32 = 0;
     let engine: Arc<dyn IoEngine> = Arc::new(CoreIoEngine::new(1024));
