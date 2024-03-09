@@ -344,9 +344,7 @@ pub fn insert<V: Serializable>(spine: &mut Spine, key: u32, value: &V) -> Result
     let mut idx;
 
     loop {
-        let flags = read_flags(spine.child().r())?;
-
-        if flags == BTreeFlags::Internal {
+        if spine.is_internal()? {
             let mut child = ensure_space::<MetadataBlock>(spine, key)?;
 
             // FIXME: remove, just here whilst hunting a bug
@@ -400,9 +398,7 @@ pub fn overwrite<V: Serializable>(
     let mut idx;
 
     loop {
-        let flags = read_flags(spine.child().r())?;
-
-        if flags == BTreeFlags::Internal {
+        if spine.is_internal()? {
             let mut child = spine.child_node::<u32>();
 
             idx = child.keys.bsearch(&new_key);

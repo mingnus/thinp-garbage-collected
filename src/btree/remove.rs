@@ -278,9 +278,7 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
     let mut idx = 0isize;
 
     loop {
-        let flags = read_flags(spine.child().r())?;
-
-        if flags == BTreeFlags::Internal {
+        if spine.is_internal()? {
             let old_loc = spine.child_loc();
             let child = spine.child_node::<MetadataBlock>();
 
@@ -303,6 +301,7 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
             // FIXME: check this
             spine.push(idx as usize, child.values.get(idx as usize))?;
         } else {
+            // leaf
             let mut child = spine.child_node::<LeafV>();
 
             let idx = child.keys.bsearch(&key);
@@ -375,25 +374,22 @@ where
     InternalFn: Fn(&mut Node<MetadataBlock, WriteProxy>) -> Result<Option<usize>>, // returns index
     LeafFn: FnOnce(&mut Node<LeafV, WriteProxy>) -> Result<()>,
 {
-    let mut parent_idx = 0;
+    let mut parent_idx;
 
     loop {
-        match read_flags(spine.child().r())? {
-            BTreeFlags::Internal => {
-                let mut child = spine.child_node::<MetadataBlock>();
+        if spine.is_internal()? {
+            let mut child = spine.child_node::<MetadataBlock>();
 
-                if let Some(idx) = internal_fn(&mut child)? {
-                    parent_idx = idx;
-                    spine.push(parent_idx, child.values.get(parent_idx))?;
-                } else {
-                    break;
-                }
-            }
-            BTreeFlags::Leaf => {
-                let mut child = spine.child_node::<LeafV>();
-                leaf_fn(&mut child)?;
+            if let Some(idx) = internal_fn(&mut child)? {
+                parent_idx = idx;
+                spine.push(parent_idx, child.values.get(parent_idx))?;
+            } else {
                 break;
             }
+        } else {
+            let mut child = spine.child_node::<LeafV>();
+            leaf_fn(&mut child)?;
+            break;
         }
     }
 

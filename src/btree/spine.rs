@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::block_cache::*;
 use crate::block_kinds::*;
 use crate::btree::node::*;
+use crate::byte_types::*;
 use crate::packed_array::*;
 use crate::transaction_manager::*;
 
@@ -61,6 +62,16 @@ impl Spine {
     /// True if there is no parent node
     pub fn is_top(&self) -> bool {
         self.nodes.len() == 1
+    }
+
+    pub fn is_leaf(&self) -> Result<bool> {
+        let child = &self.nodes.last().unwrap().block;
+        Ok(read_flags(child.r())? == BTreeFlags::Leaf)
+    }
+
+    pub fn is_internal(&self) -> Result<bool> {
+        let child = &self.nodes.last().unwrap().block;
+        Ok(read_flags(child.r())? == BTreeFlags::Internal)
     }
 
     fn patch(&mut self, parent_idx: usize, loc: MetadataBlock) {
