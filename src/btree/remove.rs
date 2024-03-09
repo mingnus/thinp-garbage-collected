@@ -275,8 +275,6 @@ fn rebalance_children<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Resul
 }
 
 pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option<LeafV>> {
-    let mut idx = 0isize;
-
     loop {
         if spine.is_internal()? {
             let old_loc = spine.child_loc();
@@ -295,7 +293,7 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
             // Reaquire the child because it may have changed due to the
             // rebalance.
             let child = spine.child_node::<MetadataBlock>();
-            idx = child.keys.bsearch(&key);
+            let idx = child.keys.bsearch(&key);
 
             // We know the key is present or else rebalance_children would have failed.
             // FIXME: check this

@@ -110,8 +110,6 @@ fn split_beneath<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
     new_parent.append(&[lkeys[0], rkeys[0]], &[left.loc, right.loc]);
 
     // Choose the correct child in the spine
-    let left_loc = left.loc;
-    let right_loc = right.loc;
     drop(left);
     drop(right);
 

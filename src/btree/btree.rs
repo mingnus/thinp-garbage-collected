@@ -461,7 +461,6 @@ mod test {
     use std::sync::{Arc, Mutex};
     use test_log::test;
     use thinp::io_engine::*;
-    use tracing::{event, instrument, Level};
 
     fn mk_engine(nr_blocks: u32) -> Arc<dyn IoEngine> {
         Arc::new(CoreIoEngine::new(nr_blocks as u64))
