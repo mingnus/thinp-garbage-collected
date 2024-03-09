@@ -125,7 +125,7 @@ fn split_beneath<NV: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
 #[instrument]
 fn rebalance_left<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
     let parent_index = {
-        let mut parent = w_node(spine.parent());
+        let mut parent = spine.parent_node();
         let parent_idx = spine.parent_index().unwrap();
         let left_loc = parent.values.get(parent_idx - 1);
         let left_block = spine.shadow(left_loc)?;
@@ -154,7 +154,7 @@ fn rebalance_left<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
 #[instrument]
 fn rebalance_right<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
     let parent_index = {
-        let mut parent = w_node(spine.parent());
+        let mut parent = spine.parent_node();
         let parent_idx = spine.parent_index().unwrap();
         let right_loc = parent.values.get(parent_idx + 1);
         let right_block = spine.shadow(right_loc)?;
@@ -199,7 +199,7 @@ fn split_into_two<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
         redistribute2(&mut left, &mut right);
 
         // Adjust the parent keys
-        let mut parent = w_node(spine.parent());
+        let mut parent = spine.parent_node();
         let parent_index = spine.parent_index().unwrap();
 
         let first_key = right.first_key().unwrap();
@@ -223,7 +223,7 @@ fn split_into_two<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
 
 #[instrument]
 fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let mut parent = w_node::<u32>(spine.parent());
+    let mut parent = spine.parent_node();
     let parent_index = spine.parent_index().unwrap();
 
     // FIXME: multiple parent indexes
@@ -287,7 +287,7 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
 
 #[instrument]
 fn rebalance_or_split<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
-    let parent = w_node::<u32>(spine.parent());
+    let parent = spine.parent_node();
     let parent_index = spine.parent_index().unwrap();
     let nr_parent = parent.nr_entries.get() as usize;
 

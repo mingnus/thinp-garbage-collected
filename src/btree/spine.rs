@@ -140,12 +140,16 @@ impl Spine {
         self.nodes.last().unwrap().block.loc()
     }
 
-    pub fn parent(&self) -> WriteProxy {
+    fn parent(&self) -> WriteProxy {
         if self.nodes.len() <= 1 {
             panic!("No parent");
         }
 
         self.nodes[self.nodes.len() - 2].block.clone()
+    }
+
+    pub fn parent_node(&mut self) -> Node<MetadataBlock, WriteProxy> {
+        w_node(self.parent())
     }
 
     pub fn parent_index(&self) -> Option<usize> {
