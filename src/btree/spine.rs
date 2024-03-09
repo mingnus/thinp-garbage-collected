@@ -46,11 +46,10 @@ impl Spine {
         root: MetadataBlock,
     ) -> Result<Self> {
         let block = tm.shadow(context, root, &BNODE_KIND)?;
-        let mut nodes = Vec::new();
-        nodes.push(Frame {
+        let nodes = vec![Frame {
             parent_index: None,
             block,
-        });
+        }];
 
         Ok(Self { tm, context, nodes })
     }
@@ -136,7 +135,6 @@ impl Spine {
         self.nodes[self.nodes.len() - 2].block.clone()
     }
 
-    // FIXME: do we need this now that the spine patches the parent entries?
     pub fn parent_index(&self) -> Option<usize> {
         self.nodes.last().unwrap().parent_index
     }
