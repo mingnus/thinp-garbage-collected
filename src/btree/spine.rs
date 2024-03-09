@@ -28,7 +28,7 @@ struct Frame {
 /// The `Spine` integrates closely with a transaction management system to
 /// ensure that all modifications are performed safely and atomically.
 pub struct Spine {
-    pub tm: Arc<TransactionManager>, // FIXME: stop this being public
+    tm: Arc<TransactionManager>,
     context: ReferenceContext,
     nodes: Vec<Frame>,
 }
@@ -147,7 +147,6 @@ impl Spine {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn peek(&self, loc: MetadataBlock) -> Result<ReadProxy> {
         let block = self.tm.read(loc, &BNODE_KIND)?;
         Ok(block)

@@ -17,7 +17,7 @@ struct Child<V: Serializable> {
 }
 
 fn is_leaf(spine: &mut Spine, loc: MetadataBlock) -> Result<bool> {
-    let b = spine.tm.read(loc, &BNODE_KIND)?;
+    let b = spine.peek(loc)?;
     let flags = read_flags(b.r())?;
 
     Ok(flags == BTreeFlags::Leaf)

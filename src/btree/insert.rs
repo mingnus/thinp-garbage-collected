@@ -184,10 +184,10 @@ fn get_node_free_space<V: Serializable>(node: &RNode<V>) -> usize {
     Node::<V, ReadProxy>::max_entries() - node.nr_entries.get() as usize
 }
 
-fn get_loc_free_space<V: Serializable>(tm: &TransactionManager, loc: u32) -> usize {
-    let block = tm.read(loc, &BNODE_KIND).unwrap();
+fn get_loc_free_space<V: Serializable>(spine: &mut Spine, loc: u32) -> Result<usize> {
+    let block = spine.peek(loc)?;
     let node = r_node::<V>(block);
-    get_node_free_space(&node)
+    Ok(get_node_free_space(&node))
 }
 
 #[instrument]
@@ -296,7 +296,7 @@ fn rebalance_or_split<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()
         let left_loc = parent.values.get(parent_index - 1);
 
         // Can we move some entries to it?
-        if get_loc_free_space::<V>(spine.tm.as_ref(), left_loc) >= SPACE_THRESHOLD {
+        if get_loc_free_space::<V>(spine, left_loc)? >= SPACE_THRESHOLD {
             return rebalance_left::<V>(spine, key);
         }
     }
@@ -306,7 +306,7 @@ fn rebalance_or_split<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()
         let right_loc = parent.values.get(parent_index + 1);
 
         // Can we move some entries to it?
-        if get_loc_free_space::<V>(spine.tm.as_ref(), right_loc) >= SPACE_THRESHOLD {
+        if get_loc_free_space::<V>(spine, right_loc)? >= SPACE_THRESHOLD {
             return rebalance_right::<V>(spine, key);
         }
     }
