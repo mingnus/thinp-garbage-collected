@@ -16,8 +16,17 @@ struct Frame {
     block: WriteProxy,
 }
 
-/// A Spine is a stack of nodes that are being modified.  eg, it could
-/// represent the path from the root of a btree to an individual leaf.
+/// `Spine` represents a modifiable path within a B-tree structure,
+/// encapsulating a stack of nodes from the root to a specific target node.
+///
+/// This structure is designed to facilitate operations that
+/// require modifications along a path in the B-tree, such as insertions,
+/// deletions, or rebalancing. It maintains a stack of `Frame` instances,
+/// each representing a node in the path, along with its parent's index and
+/// a proxy for writing changes to the node.
+///
+/// The `Spine` integrates closely with a transaction management system to
+/// ensure that all modifications are performed safely and atomically.
 pub struct Spine {
     pub tm: Arc<TransactionManager>, // FIXME: stop this being public
     context: ReferenceContext,
@@ -64,6 +73,7 @@ impl Spine {
         self.nodes.len() == 1
     }
 
+    #[allow(dead_code)]
     pub fn is_leaf(&self) -> Result<bool> {
         let child = &self.nodes.last().unwrap().block;
         Ok(read_flags(child.r())? == BTreeFlags::Leaf)
@@ -79,6 +89,14 @@ impl Spine {
         child.values.set(parent_idx, &loc);
     }
 
+    /// Adds a new node to the `Spine`, effectively descending one level
+    /// deeper in the B-tree.
+    ///
+    /// This method takes the index into the current child node.
+    /// 1. Retrieves the location (`loc`) of the new node based on the provided `parent_index`.
+    /// 2. Creates a shadow copy of the new node for modification, using the transaction manager.
+    /// 3. Updates the parent node's child pointer to point to the location of the shadowed new node.
+    /// 4. Pushes a new `Frame` onto the `Spine` stack, representing the new node.
     pub fn push(&mut self, parent_index: usize) -> Result<()> {
         let parent = self.child_node();
         let loc = parent.values.get(parent_index);
@@ -91,6 +109,16 @@ impl Spine {
         Ok(())
     }
 
+    /// Removes the top node from the `Spine`, moving one level up in the B-tree.
+    ///
+    /// This method is used to backtrack after descending into the
+    /// tree. It's not allowed to pop the root node.
+    ///
+    /// # Returns
+    /// * `Result<()>` - Ok if the top node was successfully removed, or an error if attempting to pop the root node.
+    ///
+    /// # Errors
+    /// Returns an error if called on a `Spine` with only the root node, as the root cannot be popped.
     pub fn pop(&mut self) -> Result<()> {
         if self.is_top() {
             return Err(anyhow!("can't pop the root of the spine"));
@@ -100,22 +128,26 @@ impl Spine {
         Ok(())
     }
 
-    fn replace_child(&mut self, parent_index: usize, block: WriteProxy) {
+    /// Replaces the root node of the `Spine` with a new block, identified by `loc`.
+    ///
+    /// This method is typically used during operations that require the
+    /// root of the B-tree to be modified, such as when the current root
+    /// is split during an insertion that increases the tree's height. It
+    /// ensures that the `Spine`'s path reflects the new structure of the
+    /// tree by updating the root node to point to the new location.
+    pub fn replace_root(&mut self, loc: MetadataBlock) -> Result<()> {
+        ensure!(self.is_top());
+        let block = self.shadow(loc)?;
         if let Some(last) = self.nodes.last_mut() {
             *last = Frame {
-                parent_index: Some(parent_index),
+                parent_index: None,
                 block,
             };
         }
-    }
-
-    pub fn replace_root(&mut self, parent_index: usize, loc: MetadataBlock) -> Result<()> {
-        ensure!(self.is_top());
-        let block = self.shadow(loc)?;
-        self.replace_child(parent_index, block);
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn peek(&self, loc: MetadataBlock) -> Result<ReadProxy> {
         let block = self.tm.read(loc, &BNODE_KIND)?;
         Ok(block)
@@ -128,16 +160,12 @@ impl Spine {
         Ok(block)
     }
 
-    pub fn child(&mut self) -> WriteProxy {
+    fn child(&mut self) -> WriteProxy {
         self.nodes.last_mut().unwrap().block.clone()
     }
 
     pub fn child_node<LeafV: Serializable>(&mut self) -> Node<LeafV, WriteProxy> {
         w_node(self.child())
-    }
-
-    pub fn child_loc(&self) -> MetadataBlock {
-        self.nodes.last().unwrap().block.loc()
     }
 
     fn parent(&self) -> WriteProxy {
