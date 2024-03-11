@@ -24,9 +24,6 @@ struct Frame {
 /// deletions, or rebalancing. It maintains a stack of `Frame` instances,
 /// each representing a node in the path, along with its parent's index and
 /// a proxy for writing changes to the node.
-///
-/// The `Spine` integrates closely with a transaction management system to
-/// ensure that all modifications are performed safely and atomically.
 pub struct Spine {
     tm: Arc<TransactionManager>,
     context: ReferenceContext,
@@ -147,6 +144,8 @@ impl Spine {
         Ok(())
     }
 
+    /// Temporarily reads a block at the specified location without
+    /// modifying the `Spine`.
     pub fn peek(&self, loc: MetadataBlock) -> Result<ReadProxy> {
         let block = self.tm.read(loc, &BNODE_KIND)?;
         Ok(block)
