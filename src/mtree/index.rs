@@ -108,7 +108,10 @@ impl Index {
     }
 
     pub fn remove(&mut self, kbegin: u32, kend: u32) -> Result<()> {
-        self.tree.remove_range(kbegin, kend)?;
+        let no_split_low = |k: u32, v: &MetadataBlock| (k, *v);
+        let no_split_high = |k: u32, v: &MetadataBlock| (k, *v);
+        self.tree
+            .remove_range(kbegin, kend, no_split_low, no_split_high)?;
         Ok(())
     }
 }

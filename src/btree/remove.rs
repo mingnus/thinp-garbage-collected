@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{anyhow, ensure, Result};
 
 use crate::block_cache::*;
 use crate::btree::node::*;
@@ -317,7 +317,7 @@ pub fn remove<LeafV: Serializable>(spine: &mut Spine, key: u32) -> Result<Option
 
 enum InternalContinuation {
     Continue(usize), // node index
-    RemoveNode,      // Implies stop
+    RemoveNode,      // implicit stop
 }
 
 #[derive(Eq, PartialEq)]
@@ -329,18 +329,22 @@ enum LeafContinuation {
 /// Assumes the current child is empty, then goes back up the spine
 /// removing empty nodes.
 fn remove_empty_nodes(spine: &mut Spine) -> Result<()> {
-    // Root node is allowed to be empty
+    // Only the root node is allowed to be empty ...
     if spine.is_top() {
-        return Ok(());
-    }
+        // ...but only if it's a leaf
+        if !spine.is_leaf()? {
+            let mut child = spine.child_node::<MetadataBlock>();
+            child.flags.set(BTreeFlags::Leaf as u32);
+        }
+    } else {
+        let idx = spine.parent_index();
+        spine.pop()?;
+        let mut node = spine.child_node::<MetadataBlock>();
+        node.remove_at(idx.unwrap());
 
-    let idx = spine.parent_index();
-    spine.pop()?;
-    let mut node = spine.child_node::<MetadataBlock>();
-    node.remove_at(idx.unwrap());
-
-    if node.is_empty() {
-        remove_empty_nodes(spine)?;
+        if node.is_empty() {
+            remove_empty_nodes(spine)?;
+        }
     }
 
     Ok(())
@@ -579,59 +583,169 @@ where
 
 //------------------
 
-/*
-// Returns a vec of blocks starting with the root, and always taking the leftmost child.
-fn leftmost_spine<LeafV: Serializable>(
-    tm: &Arc<TransactionManager>,
-    root: MetadataBlock,
-) -> Result<Vec<MetadataBlock>> {
-    let mut results = Vec::new();
-    let mut b = root;
+pub fn right_most_spine(spine: &mut Spine) -> Result<()> {
+    while spine.is_internal()? {
+        let node = spine.child_node::<MetadataBlock>();
+        let nr_entries = node.nr_entries.get() as usize;
 
-    loop {
-        results.push(b);
-        let block = tm.read(b, &BNODE_KIND)?;
-
-        match read_flags(block.r())? {
-            BTreeFlags::Internal => {
-                let child = r_node::<MetadataBlock>(block);
-                b = child.first().unwrap().1;
-            }
-            BTreeFlags::Leaf => {
-                break;
-            }
+        if nr_entries == 0 {
+            return Err(anyhow!(
+                "Encountered a node with no entries while tracing the right most spine."
+            ));
         }
-    }
 
-    Ok(results)
-}
-
-// Walk the spine down the rightmost entries.
-fn rightmost_spine<LeafV: Serializable>(spine: &mut Spine) -> Result<()> {
-    while read_flags(spine.child().r())? == BTreeFlags::Internal {
-        let child = w_node::<MetadataBlock>(spine.child());
-        spine.push(child.last().unwrap().1)?;
+        let idx = nr_entries - 1;
+        spine.push(idx)?;
     }
 
     Ok(())
 }
 
-pub fn merge<LeafV: Serializable>(spine: &mut Spine, right_root: MetadataBlock) -> Result<()> {
+pub fn left_most_spine(spine: &mut Spine) -> Result<()> {
+    while spine.is_internal()? {
+        let node = spine.child_node::<MetadataBlock>();
+        if node.is_empty() {
+            return Err(anyhow!(
+                "Encountered a node with no entries while tracing the left most spine."
+            ));
+        }
 
-    let mut parent_index = 0;
+        spine.push(0)?;
+    }
 
+    Ok(())
+}
+
+#[derive(Eq, PartialEq)]
+enum MergeOutcome {
+    Merged,
+    Balanced,
+}
+
+fn should_rebalance(nr_left: u32, nr_right: u32, max: u32) -> bool {
+    let half = max / 2;
+
+    if nr_left < half || nr_right < half {
+        return true;
+    }
+
+    let threshold = max / 8;
+    nr_left.abs_diff(nr_right) > threshold
+}
+
+fn merge_nodes<NV>(left: &mut WNode<NV>, right: &mut WNode<NV>) -> MergeOutcome
+where
+    NV: Serializable,
+{
+    let nr_left = left.nr_entries.get();
+    let nr_right = right.nr_entries.get();
+    let max_entries = WNode::<NV>::max_entries() as u32;
+
+    // Check if both roots can be merged directly without exceeding the max entries limit
+    if nr_left + nr_right <= max_entries {
+        // We can merge both nodes into one.
+        let (keys, values) = right.shift_left(right.nr_entries());
+        left.append(&keys, &values);
+        MergeOutcome::Merged
+    } else {
+        // Too many entries to merge.  Should we rebalance?
+
+        if should_rebalance(nr_left, nr_right, max_entries) {
+            let target_left = (nr_left + nr_right) / 2;
+            shift_(left, right, nr_left as isize - target_left as isize);
+        }
+        MergeOutcome::Balanced
+    }
+}
+
+/// Returns true if the right node is empty.  Does not pop the spines if we're at the
+/// roots.
+fn merge_and_pop<NV>(l_spine: &mut Spine, r_spine: &mut Spine) -> Result<bool>
+where
+    NV: Serializable,
+{
+    let mut left = l_spine.child_node::<NV>();
+    let mut right = r_spine.child_node::<NV>();
+
+    let outcome = merge_nodes::<NV>(&mut left, &mut right);
+
+    if !l_spine.is_top() {
+        l_spine.pop()?;
+        r_spine.pop()?;
+
+        if outcome == MergeOutcome::Merged {
+            // drop the first entry of right
+            let mut right = r_spine.child_node::<MetadataBlock>();
+            right.remove_at(0);
+        }
+    }
+
+    Ok(right.is_empty())
+}
+
+fn new_layer<NV>(l_spine: &mut Spine, r_spine: &mut Spine) -> Result<()>
+where
+    NV: Serializable,
+{
+    let new = l_spine.new_block()?;
+    let mut new_root = w_node::<MetadataBlock>(new);
+    let l = l_spine.child_node::<NV>();
+    let r = r_spine.child_node::<NV>();
+    let keys = vec![l.first_key().unwrap(), r.first_key().unwrap()];
+    let values = vec![l.loc, r.loc];
+    new_root.append(&keys, &values);
+    l_spine.replace_root(new_root.loc)
+}
+
+pub fn merge_same_depth<LeafV>(l_spine: &mut Spine, r_spine: &mut Spine) -> Result<()>
+where
+    LeafV: Serializable,
+{
+    ensure!(l_spine.len() == r_spine.len());
+
+    let mut r_is_empty;
     loop {
-        match read_flags(spine.child().r())? {
-            BTreeFlags::Internal => {
-                let mut child = w_node::<MetadataBlock>(spine.child());
-                patch_parent(spine, parent_index, child.loc);
-            }
-            BTreeFlags::Leaf => {}
+        if l_spine.is_leaf()? {
+            r_is_empty = merge_and_pop::<LeafV>(l_spine, r_spine)?;
+        } else {
+            r_is_empty = merge_and_pop::<MetadataBlock>(l_spine, r_spine)?;
+        }
+
+        if l_spine.is_top() {
+            break;
+        }
+    }
+
+    if !r_is_empty {
+        // We need a new layer
+        if r_spine.is_leaf()? {
+            new_layer::<LeafV>(r_spine, l_spine)?;
+        } else {
+            new_layer::<MetadataBlock>(r_spine, l_spine)?;
         }
     }
 
     Ok(())
 }
-*/
+
+pub fn merge<LeafV>(l_spine: &mut Spine, r_spine: &mut Spine) -> Result<()>
+where
+    LeafV: Serializable,
+{
+    let len_delta = l_spine.len() - r_spine.len();
+    if len_delta > 0 {
+        // left spine will become the result
+
+        todo!();
+    } else if len_delta < 0 {
+        // right spine will become the result
+        // FIXME: but the context for the right spine is temporary!?
+        todo!();
+    } else {
+        merge_same_depth::<LeafV>(l_spine, r_spine)?;
+    }
+
+    Ok(())
+}
 
 //-------------------------------------------------------------------------

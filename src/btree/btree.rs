@@ -371,8 +371,29 @@ impl<V: Serializable> BTree<V> {
     }
 
     /// Returns any values removed
-    pub fn remove_range(&mut self, _key_low: u32, _key_high: u32) -> Result<Vec<V>> {
-        todo!();
+    pub fn remove_range<LeafV, SplitLowFn, SplitHighFn>(
+        &mut self,
+        key_low: u32,
+        key_high: u32,
+        split_low_fn: SplitLowFn,
+        split_high_fn: SplitHighFn,
+    ) -> Result<()>
+    where
+        LeafV: Serializable,
+        SplitLowFn: FnOnce(u32, &LeafV) -> (u32, LeafV),
+        SplitHighFn: FnOnce(u32, &LeafV) -> (u32, LeafV),
+    {
+        let mut l_spine = self.mk_spine()?;
+
+        let scopes = self.tm.scopes();
+        let mut scopes = scopes.lock().unwrap();
+        let scope = scopes.new_scope();
+        let context = ReferenceContext::Scoped(scope.id);
+        let mut r_spine = Spine::new(self.tm.clone(), context, self.root)?;
+
+        remove::remove_geq(&mut l_spine, key_low, split_low_fn)?;
+        remove::remove_lt(&mut r_spine, key_high, split_high_fn)?;
+        remove::merge::<LeafV>(&mut l_spine, &mut r_spine)
     }
 
     //-------------------------------

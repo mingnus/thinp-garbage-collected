@@ -70,6 +70,10 @@ impl Spine {
         self.nodes.len() == 1
     }
 
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
     #[allow(dead_code)]
     pub fn is_leaf(&self) -> Result<bool> {
         let child = &self.nodes.last().unwrap().block;
