@@ -135,6 +135,14 @@ impl BlockAllocator {
         })
     }
 
+    pub fn nr_metadata_blocks(&self) -> Result<u64> {
+        Ok(self.allocated_metadata.len())
+    }
+
+    pub fn nr_data_blocks(&self) -> Result<u64> {
+        Ok(self.allocated_data.len())
+    }
+
     pub fn copy_roots(&self) -> Result<Vec<BitsetRoot>> {
         let mut roots = Vec::new();
         roots.push(self.reserved_metadata.get_root()?);

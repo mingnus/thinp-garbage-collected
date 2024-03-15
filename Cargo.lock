@@ -44,6 +44,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
+name = "bsp-block-allocator"
+version = "0.1.0"
+source = "git+https://github.com/jthornber/extent-allocator.git?branch=main#0b476e25787426549c76501787607e11044f5129"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -460,6 +468,7 @@ name = "thinp-garbage-collected"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bsp-block-allocator",
  "byteorder",
  "crc32c",
  "fixedbitset",

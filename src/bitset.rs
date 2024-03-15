@@ -295,7 +295,7 @@ fn load_indexes(cache: Arc<MetadataCache>, root: u32) -> Result<Vec<MetadataInde
 
 //-------------------------------------------------------------------------
 
-#[derive(Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct BitsetRoot {
     nr_bits: u64,
     nr_enabled: u64,
