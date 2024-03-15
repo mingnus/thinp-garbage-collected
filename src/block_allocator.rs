@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, ensure, Result};
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
@@ -104,6 +104,45 @@ impl BlockAllocator {
             .collect::<Result<Vec<u32>>>()?;
 
         Bitset::new(metadata_cache.clone(), &bitset_blocks, nr_bits)
+    }
+
+    pub fn open(metadata_cache: Arc<MetadataCache>, roots: &[BitsetRoot]) -> Result<Self> {
+        ensure!(roots.len() == 5);
+
+        let reserved_metadata = Bitset::open(metadata_cache.clone(), roots[0].clone())?;
+        let allocated_metadata = Bitset::open(metadata_cache.clone(), roots[1].clone())?;
+        let allocated_data = Bitset::open(metadata_cache.clone(), roots[2].clone())?;
+        let seen_metadata = Bitset::open(metadata_cache.clone(), roots[3].clone())?;
+        let seen_data = Bitset::open(metadata_cache.clone(), roots[4].clone())?;
+
+        let nr_metadata_blocks = reserved_metadata.len();
+        ensure!(nr_metadata_blocks <= metadata_cache.nr_blocks() as u64);
+        ensure!(nr_metadata_blocks == allocated_metadata.len());
+        ensure!(nr_metadata_blocks == seen_metadata.len());
+
+        let nr_data_blocks = allocated_data.len();
+        ensure!(nr_data_blocks == seen_data.len());
+
+        Ok(BlockAllocator {
+            nr_data_blocks,
+            metadata_cache,
+            reserved_metadata,
+            allocated_metadata,
+            allocated_data,
+            seen_metadata,
+            seen_data,
+            roots: Vec::new(),
+        })
+    }
+
+    pub fn copy_roots(&self) -> Result<Vec<BitsetRoot>> {
+        let mut roots = Vec::new();
+        roots.push(self.reserved_metadata.get_root()?);
+        roots.push(self.allocated_metadata.get_root()?);
+        roots.push(self.allocated_data.get_root()?);
+        roots.push(self.seen_metadata.get_root()?);
+        roots.push(self.seen_data.get_root()?);
+        Ok(roots)
     }
 
     pub fn reserve_metadata(&mut self, b: u32) -> Result<()> {
