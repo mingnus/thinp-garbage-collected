@@ -190,6 +190,7 @@ impl MetadataInner {
     }
 
     fn write_initial_superblock(&mut self) -> Result<()> {
+        let roots = self.allocator.lock().unwrap().copy_roots()?;
         let mut sblock = self.tm.superblock();
 
         let mut w = std::io::Cursor::new(sblock.rw());
@@ -200,8 +201,6 @@ impl MetadataInner {
         };
         write_block_header(&mut w, &hdr)?;
         drop(w);
-
-        let roots = self.allocator.lock().unwrap().copy_roots()?;
 
         let mut sb = Superblock::new(sblock);
         sb.flags.set(0);
@@ -332,6 +331,51 @@ impl MetadataInner {
 
         Ok(())
     }
+
+    fn write_changed_details(&mut self) -> Result<()> {
+        for (_, td) in self.thin_devices.iter() {
+            let mut td = td.inner.lock().unwrap();
+            if !td.changed {
+                continue;
+            }
+            self.details_tree.insert(td.id, &td.details)?;
+            td.changed = false;
+        }
+        self.thin_devices
+            .retain(|_dev, td| td.inner.lock().unwrap().changed);
+        Ok(())
+    }
+
+    fn update_superblock(&mut self) -> Result<()> {
+        let roots = self.allocator.lock().unwrap().copy_roots()?;
+        let mut sblock = self.tm.superblock();
+
+        let mut w = std::io::Cursor::new(sblock.rw());
+        let hdr = BlockHeader {
+            loc: SUPERBLOCK_LOCATION,
+            kind: SUPERBLOCK_KIND,
+            sum: 0,
+        };
+        write_block_header(&mut w, &hdr)?;
+        drop(w);
+
+        let mut sb = Superblock::new(sblock);
+        sb.time.set(self.time);
+        sb.transaction_id.set(self.transaction_id);
+        sb.block_allocator_roots.prepend(&roots);
+        sb.data_mapping_root.set(self.mapping_tree.root());
+        sb.device_details_root.set(self.details_tree.root());
+        sb.data_block_size.set(self.data_block_size);
+
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        self.write_changed_details()?;
+        self.tm.pre_commit(&[])?; // FIXME: use the actual roots
+        self.update_superblock()?;
+        self.tm.commit()
+    }
 }
 
 //-------------------------------------------------------------------------
@@ -376,7 +420,8 @@ impl Pool {
     }
 
     pub fn commit(&mut self) -> Result<()> {
-        todo!();
+        let mut inner = self.inner.lock().unwrap();
+        inner.commit()
     }
 
     pub fn abort(&mut self) -> Result<()> {

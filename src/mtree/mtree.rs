@@ -296,7 +296,8 @@ mod mtree {
 
         fn commit(&mut self) -> Result<()> {
             let roots = vec![self.tree.root()];
-            self.tm.commit(&roots)
+            self.tm.pre_commit(&roots)?;
+            self.tm.commit()
         }
     }
 

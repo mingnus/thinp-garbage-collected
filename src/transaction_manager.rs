@@ -34,7 +34,7 @@ impl TransactionManager_ {
         }
     }
 
-    fn commit(&mut self, roots: &[u32]) -> Result<()> {
+    fn pre_commit(&mut self, roots: &[u32]) -> Result<()> {
         {
             let mut allocator = self.allocator.lock().unwrap();
 
@@ -43,9 +43,15 @@ impl TransactionManager_ {
             allocator.set_roots(roots);
         }
 
+        // FIXME: flush the BlockAllocator
+
         // FIXME: check that only the superblock is held
         self.cache.flush()?;
 
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<()> {
         // writeback the superblock
         self.superblock = None;
         self.cache.flush()?;
@@ -123,9 +129,14 @@ impl TransactionManager {
         }
     }
 
-    pub fn commit(&self, roots: &[u32]) -> Result<()> {
+    pub fn pre_commit(&self, roots: &[u32]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
-        inner.commit(roots)
+        inner.pre_commit(roots)
+    }
+
+    pub fn commit(&self) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.commit()
     }
 
     pub fn abort(&self) {
