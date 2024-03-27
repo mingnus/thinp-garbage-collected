@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use bsp_block_allocator::allocator::Allocator;
+use bsp_block_allocator::allocator::*;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -259,7 +259,14 @@ impl MetadataInner {
             return Err(anyhow!("device already exists"));
         }
 
-        let td = Arc::new(ThinDevice::new(dev, self.transaction_id, self.time, pool));
+        let data_alloc = self.data_extents.get_context();
+        let td = Arc::new(ThinDevice::new(
+            dev,
+            self.transaction_id,
+            self.time,
+            data_alloc,
+            pool,
+        ));
         self.thin_devices.insert(dev, td.clone());
         Ok(td)
     }
@@ -274,7 +281,8 @@ impl MetadataInner {
             .details_tree
             .lookup(dev)?
             .ok_or_else(|| anyhow!("device doesn't exist"))?;
-        let td = Arc::new(ThinDevice::from_disk(dev, &details, pool));
+        let data_alloc = self.data_extents.get_context();
+        let td = Arc::new(ThinDevice::from_disk(dev, &details, data_alloc, pool));
         self.thin_devices.insert(dev, td.clone());
         Ok(td)
     }
@@ -507,9 +515,63 @@ struct RangeResult {
 struct ThinDeviceInner {
     pool: Arc<Pool>,
     id: ThinId,
+    data_alloc: Arc<Mutex<AllocContext>>,
     open_count: u32,
     changed: bool,
     details: DeviceDetails,
+}
+
+impl ThinDeviceInner {
+    fn alloc_data_block(&mut self) -> Result<u64> {
+        let mut pmd = self.pool.inner.lock().unwrap();
+        // clone the reference to avoid immutable borrow on the Pool
+        // FIXME: any better solution?
+        let allocator = pmd.allocator.clone();
+        let mut allocator = allocator.lock().unwrap();
+
+        let mut retry = true;
+        loop {
+            let r = pmd
+                .data_extents
+                .alloc(self.data_alloc.clone(), |begin, end| {
+                    allocator
+                        .allocate_data(&(begin..end))
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+                })?;
+
+            if r.is_none() && retry {
+                pmd.data_extents.reset();
+                retry = false;
+            } else {
+                break r;
+            }
+        }
+        .ok_or_else(|| anyhow!("out of data space"))
+    }
+
+    fn insert_data_block(&mut self, block: u64, data_block: u64) -> Result<()> {
+        let mut pmd = self.pool.inner.lock().unwrap();
+
+        let subtree_root = pmd
+            .mapping_tree
+            .lookup(self.id)?
+            .ok_or_else(|| anyhow!("device doesn't exist"))?;
+        let mut subtree: BTree<BlockTime> = BTree::open_tree(pmd.tm.clone(), subtree_root);
+        let bt = BlockTime {
+            block: data_block,
+            time: pmd.time,
+        };
+        let inserted = subtree.insert(block as u32, &bt)?; // FIXME: support 64-bit addresses
+
+        self.changed = true;
+        if inserted {
+            self.details.mapped_blocks += 1;
+        }
+
+        pmd.mapping_tree.insert(self.id, &subtree.root())?;
+
+        Ok(())
+    }
 }
 
 struct ThinDevice {
@@ -518,10 +580,17 @@ struct ThinDevice {
 
 #[allow(dead_code)]
 impl ThinDevice {
-    fn new(dev: ThinId, trans_id: u64, time: u32, pool: Arc<Pool>) -> Self {
+    fn new(
+        dev: ThinId,
+        trans_id: u64,
+        time: u32,
+        data_alloc: Arc<Mutex<AllocContext>>,
+        pool: Arc<Pool>,
+    ) -> Self {
         let inner = ThinDeviceInner {
             pool,
             id: dev,
+            data_alloc,
             open_count: 1,
             changed: true,
             details: DeviceDetails::new(trans_id, time),
@@ -531,13 +600,19 @@ impl ThinDevice {
         }
     }
 
-    fn from_disk(dev: ThinId, details: &DeviceDetails, pool: Arc<Pool>) -> Self {
+    fn from_disk(
+        dev: ThinId,
+        details: &DeviceDetails,
+        data_alloc: Arc<Mutex<AllocContext>>,
+        pool: Arc<Pool>,
+    ) -> Self {
         let inner = ThinDeviceInner {
             pool,
             id: dev,
             open_count: 1,
             changed: false,
             details: details.clone(),
+            data_alloc,
         };
         Self {
             inner: Mutex::new(inner),
@@ -580,12 +655,14 @@ impl ThinDevice {
         todo!();
     }
 
-    pub fn alloc_data_block(&mut self) -> Result<u64> {
-        todo!();
+    pub fn alloc_data_block(&self) -> Result<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.alloc_data_block()
     }
 
-    pub fn insert_data_block(&mut self, _block: u64, _data_block: u64) -> Result<()> {
-        todo!();
+    pub fn insert_data_block(&mut self, block: u64, data_block: u64) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.insert_data_block(block, data_block)
     }
 
     pub fn remove_range(&mut self, _thin_blocks: Range<u64>) -> Result<()> {
