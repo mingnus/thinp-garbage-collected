@@ -499,10 +499,10 @@ mod insert_utils {
         Ok(child)
     }
 
-    pub fn insert<V: Serializable>(spine: &mut Spine, key: u32, value: &V) -> Result<()> {
+    pub fn insert<V: Serializable>(spine: &mut Spine, key: u32, value: &V) -> Result<bool> {
         let mut idx = 0isize;
 
-        loop {
+        let inserted = loop {
             let flags = read_flags(&mut spine.child().r())?;
 
             if flags == BTreeFlags::Internal {
@@ -526,6 +526,7 @@ mod insert_utils {
                 p.values.set(idx as usize, &loc);
             } else {
                 let mut child = ensure_space::<V>(spine, key, idx)?;
+                let mut inserted = false;
 
                 idx = child.keys.bsearch(&key);
 
@@ -533,11 +534,13 @@ mod insert_utils {
                     child.keys.insert_at(0, &key);
                     child.values.insert_at(0, &value);
                     child.nr_entries.inc(1);
+                    inserted = true;
                 } else if idx as usize >= child.keys.len() {
                     // insert
                     child.keys.append_single(&key);
                     child.values.append_single(value);
                     child.nr_entries.inc(1);
+                    inserted = true;
                 } else {
                     if child.keys.get(idx as usize) == key {
                         // overwrite
@@ -547,14 +550,15 @@ mod insert_utils {
                         child.keys.insert_at(idx as usize + 1, &key);
                         child.values.insert_at(idx as usize + 1, &value);
                         child.nr_entries.inc(1);
+                        inserted = true;
                     }
                 }
 
-                break;
+                break inserted;
             }
-        }
+        };
 
-        Ok(())
+        Ok(inserted)
     }
 
     pub fn overwrite<V: Serializable>(
@@ -1174,11 +1178,11 @@ impl<V: Serializable> BTree<V> {
         Ok(())
     }
 
-    pub fn insert(&mut self, key: u32, value: &V) -> Result<()> {
+    pub fn insert(&mut self, key: u32, value: &V) -> Result<bool> {
         let mut spine = Spine::new(self.tm.clone(), self.root)?;
-        insert_utils::insert(&mut spine, key, value)?;
+        let inserted = insert_utils::insert(&mut spine, key, value)?;
         self.root = spine.get_root();
-        Ok(())
+        Ok(inserted)
     }
 
     pub fn remove(&mut self, key: u32) -> Result<Option<V>> {
@@ -1360,7 +1364,7 @@ mod test {
             self.tree.lookup(key).unwrap()
         }
 
-        fn insert(&mut self, key: u32, value: &Value) -> Result<()> {
+        fn insert(&mut self, key: u32, value: &Value) -> Result<bool> {
             self.tree.insert(key, value)
         }
 
