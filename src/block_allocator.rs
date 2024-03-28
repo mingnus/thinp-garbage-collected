@@ -238,7 +238,7 @@ impl BlockAllocator {
             match state.queue.pop_front() {
                 Some(BlockRef::Metadata(block)) => {
                     eprintln!("gc examining block {}", block);
-                    if self.seen_metadata.test_and_set(block as u64)? {
+                    if !self.seen_metadata.test_and_set(block as u64)? {
                         self.refs(block, &mut state.queue)?;
                     }
                 }
