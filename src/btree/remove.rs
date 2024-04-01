@@ -67,15 +67,20 @@ fn rebalance2_aux<V: Serializable>(
     parent: &mut WNode<MetadataBlock>,
 ) -> Result<()> {
     let left_loc = parent.values.get(left_idx);
+    let left_block = spine.shadow(left_loc)?;
+    parent.values.set(left_idx, &left_block.loc());
     let mut left = Child {
         index: left_idx,
-        node: w_node::<V>(spine.shadow(left_loc)?),
+        node: w_node::<V>(left_block),
     };
 
-    let right_loc = parent.values.get(left_idx + 1);
+    let right_idx = left_idx + 1;
+    let right_loc = parent.values.get(right_idx);
+    let right_block = spine.shadow(right_loc)?;
+    parent.values.set(right_idx, &right_block.loc());
     let mut right = Child {
-        index: left_idx + 1,
-        node: w_node::<V>(spine.shadow(right_loc)?),
+        index: right_idx,
+        node: w_node::<V>(right_block),
     };
 
     rebalance2_::<V>(parent, &mut left, &mut right);
@@ -207,21 +212,29 @@ fn rebalance3_aux<V: Serializable>(
     left_idx: usize,
 ) -> Result<()> {
     let left_loc = parent.values.get(left_idx);
+    let left_block = spine.shadow(left_loc)?;
+    parent.values.set(left_idx, &left_block.loc());
     let mut left = Child {
         index: left_idx,
-        node: w_node::<V>(spine.shadow(left_loc)?),
+        node: w_node::<V>(left_block),
     };
 
-    let center_loc = parent.values.get(left_idx + 1);
+    let center_idx = left_idx + 1;
+    let center_loc = parent.values.get(center_idx);
+    let center_block = spine.shadow(center_loc)?;
+    parent.values.set(center_idx, &center_block.loc());
     let mut center = Child {
-        index: left_idx + 1,
-        node: w_node::<V>(spine.shadow(center_loc)?),
+        index: center_idx,
+        node: w_node::<V>(center_block),
     };
 
-    let right_loc = parent.values.get(left_idx + 2);
+    let right_idx = left_idx + 2;
+    let right_loc = parent.values.get(right_idx);
+    let right_block = spine.shadow(right_loc)?;
+    parent.values.set(right_idx, &right_block.loc());
     let mut right = Child {
-        index: left_idx + 2,
-        node: w_node::<V>(spine.shadow(right_loc)?),
+        index: right_idx,
+        node: w_node::<V>(right_block),
     };
 
     rebalance3_::<V>(parent, &mut left, &mut center, &mut right);

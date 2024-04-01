@@ -623,6 +623,7 @@ mod test {
             fix.insert(*k, &mk_value(*k * 2))?;
             if i % 1000 == 0 {
                 eprintln!("{}", i);
+                fix.commit()?;
                 let n = fix.check()?;
                 ensure!(n == i as u32 + 1);
             }

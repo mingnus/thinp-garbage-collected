@@ -133,9 +133,10 @@ fn rebalance_left<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
         let mut right = spine.child_node::<V>();
         redistribute2(&mut left, &mut right);
 
-        // Adjust the parent keys
+        // Adjust the parent keys and values
         let first_key = right.first_key().unwrap();
         parent.keys.set(parent_idx, &first_key);
+        parent.values.set(parent_idx - 1, &left.loc);
 
         // Choose the correct child in the spine
         if key < first_key {
@@ -162,9 +163,10 @@ fn rebalance_right<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> {
         let mut left = spine.child_node::<V>();
         redistribute2(&mut left, &mut right);
 
-        // Adjust the parent keys
+        // Adjust the parent keys and values
         let first_key = right.first_key().unwrap();
         parent.keys.set(parent_idx + 1, &first_key);
+        parent.values.set(parent_idx + 1, &right.loc);
 
         // Choose the correct child in the spine
         if key >= first_key {
@@ -241,6 +243,7 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
         // patch up the parent
         let r_first_key = right.first_key().unwrap();
         parent.keys.set(1, &r_first_key);
+        parent.values.set(1, &right.loc);
 
         let m_first_key = middle.first_key().unwrap();
         parent.insert_at(1, m_first_key, &middle.loc);
@@ -265,6 +268,7 @@ fn split_into_three<V: Serializable>(spine: &mut Spine, key: u32) -> Result<()> 
         // patch up the parent
         let r_first_key = right.first_key().unwrap();
         parent.keys.set(parent_index, &r_first_key);
+        parent.values.set(parent_index - 1, &left.loc);
 
         let m_first_key = middle.first_key().unwrap();
         parent.insert_at(parent_index, m_first_key, &middle.loc);
