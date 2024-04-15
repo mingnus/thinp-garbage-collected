@@ -178,6 +178,34 @@ impl<Data: Writeable> Bitmap<Data> {
         self.bits.rw().copy_from_slice(src.bits.r());
         self.ie.copy_from(&src.ie)
     }
+
+    fn union_with<T: Readable>(&mut self, src: &Bitmap<T>) -> Result<()> {
+        // use transmute since the endianness doesn't matter in bitwise operation
+        let (_, dst_bits, _) = unsafe { self.bits.rw().align_to_mut::<u64>() };
+        let (_, src_bits, _) = unsafe { src.bits.r().align_to::<u64>() };
+
+        let mut nr_allocated = 0;
+        let mut none_free_cnt = 0;
+        let mut none_free_before = 0;
+        for (i, (dst, src)) in dst_bits.iter_mut().zip(src_bits).enumerate() {
+            *dst |= *src;
+            nr_allocated += dst.count_ones();
+
+            if none_free_cnt == i {
+                if *dst == u64::MAX {
+                    none_free_cnt += 1;
+                    none_free_before += 8;
+                } else {
+                    none_free_before += dst.to_le().trailing_ones();
+                }
+            }
+        }
+
+        self.ie.nr_free = ENTRIES_PER_BITMAP - nr_allocated;
+        self.ie.none_free_before = none_free_before;
+
+        Ok(())
+    }
 }
 
 fn init_bitmap(mut block: WriteProxy) -> Result<Bitmap<WriteProxy>> {
@@ -510,6 +538,50 @@ impl Bitset {
         Ok(())
     }
 
+    pub fn union_with(&mut self, other: &Bitset) -> Result<()> {
+        ensure!(self.nr_bits == other.nr_bits);
+
+        let nr_bitmaps = Bitmap::blocks_required(self.nr_bits)?;
+        let nr_indexes = MetadataIndex::blocks_required(nr_bitmaps)?;
+        for ((i, dest_mi), src_mi) in self
+            .indexes
+            .iter_mut()
+            .enumerate()
+            .zip(other.indexes.iter())
+        {
+            let nr_entries = if i == nr_indexes as usize - 1 {
+                nr_bitmaps % ENTRIES_PER_INDEX
+            } else {
+                ENTRIES_PER_INDEX
+            };
+
+            for bi in 0..nr_entries {
+                let src_ie = src_mi.entries.get(bi as usize);
+
+                if src_ie.is_empty() {
+                    continue;
+                }
+
+                // union the bitmaps if necessary
+                let dest_ie = dest_mi.entries.get(bi as usize);
+                let dest_blk = self.cache.write_lock(dest_ie.blocknr, &BITMAP_KIND)?;
+                let mut dest_bm = Bitmap::new(&dest_ie, dest_blk);
+                let src_blk = self.cache.read_lock(src_ie.blocknr, &BITMAP_KIND)?;
+                let src_bm = Bitmap::new(&src_ie, src_blk);
+                if dest_ie.is_empty() {
+                    dest_bm.copy_from(&src_bm)?;
+                } else {
+                    dest_bm.union_with(&src_bm)?;
+                }
+
+                // update the IndexEntry
+                dest_mi.entries.set(bi as usize, &dest_bm.ie);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn copy_bits(&mut self, src: &Bitset) -> Result<()> {
         ensure!(self.nr_bits == src.nr_bits);
 
@@ -523,22 +595,22 @@ impl Bitset {
             };
 
             for bi in 0..nr_entries {
-                let mut dest_ie = dest_mi.entries.get(bi as usize);
                 let src_ie = src_mi.entries.get(bi as usize);
 
                 // copy the bitmap if necessary
-                if !src_ie.is_empty() {
-                    let dest_blk = self.cache.write_lock(dest_ie.blocknr, &BITMAP_KIND)?;
-                    let mut dest_bm = Bitmap::new(&dest_ie, dest_blk);
-                    let src_blk = self.cache.read_lock(src_ie.blocknr, &BITMAP_KIND)?;
-                    let src_bm = Bitmap::new(&src_ie, src_blk);
-                    dest_bm.copy_from(&src_bm)?;
+                if src_ie.is_empty() {
+                    continue;
                 }
 
+                let dest_ie = dest_mi.entries.get(bi as usize);
+                let dest_blk = self.cache.write_lock(dest_ie.blocknr, &BITMAP_KIND)?;
+                let mut dest_bm = Bitmap::new(&dest_ie, dest_blk);
+                let src_blk = self.cache.read_lock(src_ie.blocknr, &BITMAP_KIND)?;
+                let src_bm = Bitmap::new(&src_ie, src_blk);
+                dest_bm.copy_from(&src_bm)?;
+
                 // update the IndexEntry
-                dest_ie.nr_free = src_ie.nr_free;
-                dest_ie.none_free_before = src_ie.none_free_before;
-                dest_mi.entries.set(bi as usize, &dest_ie);
+                dest_mi.entries.set(bi as usize, &dest_bm.ie);
             }
         }
 
