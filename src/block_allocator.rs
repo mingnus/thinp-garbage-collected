@@ -40,6 +40,12 @@ pub struct BlockAllocator {
 
     allocated_metadata: Bitset,
     allocated_data: Bitset,
+
+    // Blocks allocated since the roots were committed
+    uncommitted_metadata: Bitset,
+    uncommitted_data: Bitset,
+
+    // GC workspace
     seen_metadata: Bitset,
     seen_data: Bitset,
 
@@ -65,6 +71,18 @@ impl BlockAllocator {
         let allocated_data =
             Self::create_bitset(&metadata_cache, &mut reserved_metadata, nr_data_blocks)?;
 
+        let uncommitted_metadata = Self::create_bitset(
+            &metadata_cache,
+            &mut reserved_metadata,
+            nr_metadata_blocks as u64,
+        )?;
+
+        let uncommitted_data = Self::create_bitset(
+            &metadata_cache,
+            &mut reserved_metadata,
+            nr_data_blocks as u64,
+        )?;
+
         let seen_metadata = Self::create_bitset(
             &metadata_cache,
             &mut reserved_metadata,
@@ -81,6 +99,8 @@ impl BlockAllocator {
             reserved_metadata,
             allocated_metadata,
             allocated_data,
+            uncommitted_metadata,
+            uncommitted_data,
             seen_metadata,
             seen_data,
             roots: Vec::new(),
@@ -114,20 +134,38 @@ impl BlockAllocator {
 
     pub fn set_roots(&mut self, roots: &[u32]) {
         self.roots = roots.to_vec();
+
+        // Reset the bitest since we're starting a new transaction
+        // FIXME: move to a stand-alone function?
+        self.uncommitted_metadata.clear_all();
+        self.uncommitted_data.clear_all();
     }
 
     pub fn allocate_metadata(&mut self) -> Result<Option<u32>> {
-        let r = self.allocated_metadata.set_first_clear()?.map(|x| x as u32);
-        if r.is_some() {
-            Ok(r)
-        } else {
-            self.gc()?;
-            Ok(self.allocated_metadata.set_first_clear()?.map(|x| x as u32))
-        }
+        let mut retry = true;
+        let r = loop {
+            let r = self.allocated_metadata.set_first_clear()?;
+
+            if let Some(b) = r {
+                self.uncommitted_metadata.set(b)?;
+                break Some(b as u32);
+            } else if retry {
+                self.gc()?;
+                retry = false;
+            } else {
+                break None;
+            }
+        };
+
+        Ok(r)
     }
 
     pub fn allocate_data(&mut self, region: &Range<u64>) -> Result<Option<u64>> {
-        self.allocated_data.set_first_clear_in_range(region)
+        let r = self.allocated_data.set_first_clear_in_range(region)?;
+        if let Some(b) = r {
+            self.uncommitted_data.set(b)?;
+        }
+        Ok(r)
     }
 
     fn refs(&self, block: u32, queue: &mut VecDeque<BlockRef>) -> Result<()> {
@@ -156,8 +194,12 @@ impl BlockAllocator {
             }
         }
 
+        self.seen_metadata.union_with(&self.uncommitted_metadata)?;
+        self.seen_data.union_with(&self.uncommitted_data)?;
         std::mem::swap(&mut self.allocated_metadata, &mut self.seen_metadata);
         std::mem::swap(&mut self.allocated_data, &mut self.seen_data);
+        self.uncommitted_metadata.clear_all()?;
+        self.uncommitted_data.clear_all()?;
         eprintln!("completed gc");
 
         Ok(())
